@@ -52,8 +52,14 @@ jobs:
           ln -sf $SDK/cmdline-tools/latest/bin/sdkmanager $SDK/tools/bin/sdkmanager
           java -version
 
-      - name: Build APK
-        run: buildozer android debug
+     - name: Build APK
+        run: |
+          buildozer android debug 2>&1 | tee build_output.log || true
+          echo "=== ULTIMAS 50 LINEAS ==="
+          tail -50 build_output.log
+          echo "=== ERRORES ==="
+          grep -i "error\|exception\|failed\|traceback" build_output.log | grep -v "DEBUG\|test_" | tail -20
+          ls -la bin/ 2>/dev/null || echo "No hay APK generado"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
