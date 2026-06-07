@@ -1,13 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v2.0 - Colores corporativos, WiFi Direct, validación por cuadrillero
-#
-#  COLORES AGRICACTUS:
-#    Verde oscuro : #2d4a1e  (fondo encabezado, botones principales)
-#    Verde medio  : #4a6741  (acentos, bordes)
-#    Amarillo/oro : #f5a623  (highlights, iconos activos)
-#    Blanco       : #ffffff  (texto sobre verde)
-#    Gris claro   : #f5f5f0  (fondo de pantallas)
+#  v2.1 - Cámara, hora de entrada configurable, días de gracia
 # =============================================================================
 
 import datetime
@@ -67,15 +60,17 @@ else:
 # =============================================================================
 #  CONSTANTES
 # =============================================================================
-VERDE_OSCURO  = (0.18, 0.29, 0.12, 1)   # #2d4a1e
-VERDE_MEDIO   = (0.29, 0.40, 0.25, 1)   # #4a6741
-AMARILLO      = (0.96, 0.65, 0.14, 1)   # #f5a623
-FONDO_GRIS    = (0.96, 0.96, 0.94, 1)   # #f5f5f0
+VERDE_OSCURO     = (0.18, 0.29, 0.12, 1)
+VERDE_MEDIO      = (0.29, 0.40, 0.25, 1)
+AMARILLO         = (0.96, 0.65, 0.14, 1)
+FONDO_GRIS       = (0.96, 0.96, 0.94, 1)
 
-ARCHIVO_DATOS  = "empleado_data.json"
-PUERTO_WIFI    = 45678
-MAX_FALTAS     = 3          # Faltas consecutivas antes de bloqueo
-DIAS_LABORALES = {0,1,2,3,4}  # Lunes-Viernes
+ARCHIVO_DATOS    = "empleado_data.json"
+PUERTO_WIFI      = 45678
+MAX_FALTAS       = 3
+DIAS_LABORALES   = {0, 1, 2, 3, 4}
+TOLERANCIA_HORAS = 2
+DIAS_GRACIA      = 3
 
 # =============================================================================
 #  PERSISTENCIA
@@ -103,10 +98,6 @@ def es_dia_laboral(fecha: datetime.date) -> bool:
     return fecha.weekday() in DIAS_LABORALES
 
 def calcular_faltas_consecutivas(historial: list) -> int:
-    """
-    Cuenta dias laborales consecutivos SIN asistencia hacia atras desde ayer.
-    Dias con estatus 'incapacidad' o 'vacaciones' NO cuentan como falta.
-    """
     dias_ok = set()
     for entrada in historial:
         f_str   = entrada.get("fecha", "")
@@ -133,7 +124,6 @@ def mes_actual_str() -> str:
     return datetime.date.today().strftime("%Y-%m")
 
 def agregar_dia_historial(historial: list, estatus: str = "presente") -> list:
-    """Agrega o actualiza el dia de hoy en el historial."""
     hoy     = datetime.date.today().isoformat()
     mes     = mes_actual_str()
     entrada = {"fecha": hoy, "estatus": estatus, "mes": mes}
@@ -150,6 +140,19 @@ def contar_faltas_mes(historial: list) -> int:
         1 for e in historial
         if e.get("mes") == mes and e.get("estatus") == "falta"
     )
+
+def en_periodo_gracia(datos: dict) -> bool:
+    fecha_ingreso_str = datos.get("fecha_ingreso", "")
+    if not fecha_ingreso_str:
+        return False
+    try:
+        fecha_ingreso = datetime.datetime.strptime(
+            fecha_ingreso_str, "%d/%m/%Y"
+        ).date()
+        dias = (datetime.date.today() - fecha_ingreso).days
+        return dias < DIAS_GRACIA
+    except Exception:
+        return False
 
 # =============================================================================
 #  INTERFAZ KV
@@ -174,9 +177,9 @@ ScreenManager:
     MDFloatLayout:
         md_bg_color: 0.96, 0.96, 0.94, 1
 
-        # ── Encabezado verde ──────────────────────────
+        # Encabezado verde
         MDFloatLayout:
-            size_hint_y: 0.18
+            size_hint_y: 0.15
             pos_hint: {'x': 0, 'top': 1}
             md_bg_color: 0.18, 0.29, 0.12, 1
 
@@ -197,57 +200,84 @@ ScreenManager:
                 pos_hint: {'center_x': 0.64, 'center_y': 0.5}
                 size_hint: (0.6, 1)
 
-        # ── Franja amarilla decorativa ────────────────
+        # Franja amarilla
         MDBoxLayout:
             size_hint_y: 0.006
-            pos_hint: {'x': 0, 'top': 0.82}
+            pos_hint: {'x': 0, 'top': 0.85}
             md_bg_color: 0.96, 0.65, 0.14, 1
 
-        # ── Campos de datos ───────────────────────────
+        # Nombre
         MDTextField:
             id: input_nombre
             hint_text: "Nombre Completo"
             helper_text: "Se convertira a MAYUSCULAS"
             helper_text_mode: "on_focus"
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.73}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.76}
             size_hint_x: 0.88
 
+        # NSS
         MDTextField:
             id: input_nss
             hint_text: "Numero de Seguro Social (NSS)"
             max_text_length: 11
             input_filter: "int"
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.61}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.65}
             size_hint_x: 0.88
 
+        # Credencial
         MDTextField:
             id: input_credencial
             hint_text: "Numero de Credencial / Empleado"
             input_filter: "int"
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.49}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.55}
             size_hint_x: 0.88
 
+        # Cuadrilla
         MDTextField:
             id: input_cuadrilla
             hint_text: "Numero de Cuadrilla"
             input_filter: "int"
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.38}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.45}
             size_hint_x: 0.88
 
-        # ── Botón foto ────────────────────────────────
-        MDRectangleFlatIconButton:
-            icon: "camera"
-            text: "SELECCIONAR FOTO DE GALERIA"
-            theme_text_color: "Custom"
-            text_color: 0.18, 0.29, 0.12, 1
-            line_color: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.28}
+        # Hora de entrada
+        MDTextField:
+            id: input_hora_entrada
+            hint_text: "Hora de entrada (ej: 07:00)"
+            helper_text: "Formato 24h — las faltas se cuentan 2h despues"
+            helper_text_mode: "on_focus"
+            line_color_focus: 0.18, 0.29, 0.12, 1
+            pos_hint: {'center_x': 0.5, 'center_y': 0.35}
             size_hint_x: 0.88
-            on_release: root.abrir_galeria()
+
+        # Botones foto
+        MDBoxLayout:
+            orientation: 'horizontal'
+            size_hint: (0.88, 0.07)
+            pos_hint: {'center_x': 0.5, 'center_y': 0.25}
+            spacing: '8dp'
+
+            MDRectangleFlatIconButton:
+                icon: "camera"
+                text: "CAMARA"
+                theme_text_color: "Custom"
+                text_color: 0.18, 0.29, 0.12, 1
+                line_color: 0.18, 0.29, 0.12, 1
+                size_hint_x: 0.5
+                on_release: root.tomar_foto()
+
+            MDRectangleFlatIconButton:
+                icon: "image"
+                text: "GALERIA"
+                theme_text_color: "Custom"
+                text_color: 0.18, 0.29, 0.12, 1
+                line_color: 0.18, 0.29, 0.12, 1
+                size_hint_x: 0.5
+                on_release: root.abrir_galeria()
 
         MDLabel:
             id: label_foto
@@ -256,13 +286,13 @@ ScreenManager:
             halign: "center"
             theme_text_color: "Custom"
             text_color: 0.5, 0.5, 0.5, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.22}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.17}
 
-        # ── Botón guardar ─────────────────────────────
+        # Boton guardar
         MDRaisedButton:
             text: "GENERAR CREDENCIAL DIGITAL"
             md_bg_color: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.10}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.08}
             size_hint_x: 0.88
             elevation: 4
             on_release: root.guardar_registro()
@@ -277,13 +307,11 @@ ScreenManager:
     MDFloatLayout:
         md_bg_color: 0.96, 0.96, 0.94, 1
 
-        # ── Franja lateral verde ──────────────────────
         MDFloatLayout:
             size_hint_x: 0.06
             pos_hint: {'x': 0, 'y': 0}
             md_bg_color: 0.18, 0.29, 0.12, 1
 
-        # ── Tarjeta principal ─────────────────────────
         MDCard:
             size_hint: (0.92, 0.88)
             pos_hint: {'right': 0.99, 'center_y': 0.50}
@@ -293,7 +321,6 @@ ScreenManager:
 
             MDFloatLayout:
 
-                # Encabezado verde de tarjeta
                 MDFloatLayout:
                     size_hint_y: 0.18
                     pos_hint: {'x': 0, 'top': 1}
@@ -325,14 +352,12 @@ ScreenManager:
                         pos_hint: {'center_x': 0.74, 'center_y': 0.34}
                         size_hint: (0.5, 0.2)
 
-                # Foto del empleado
                 FitImage:
                     source: root.ruta_foto
                     size_hint: (0.34, 0.35)
                     pos_hint: {'x': 0.04, 'center_y': 0.56}
                     radius: [8, 8, 8, 8]
 
-                # Nombre
                 MDLabel:
                     text: root.nombre_empleado
                     markup: True
@@ -346,7 +371,6 @@ ScreenManager:
                     pos_hint: {'x': 0.42, 'center_y': 0.62}
                     size_hint: (0.55, 0.18)
 
-                # Fecha de ingreso
                 MDLabel:
                     text: "Ingreso: " + root.fecha_ingreso
                     font_style: "Caption"
@@ -355,7 +379,6 @@ ScreenManager:
                     pos_hint: {'x': 0.42, 'center_y': 0.52}
                     size_hint: (0.55, 0.06)
 
-                # Cuadrilla
                 MDLabel:
                     text: "Cuadrilla: " + root.num_cuadrilla
                     font_style: "Body2"
@@ -366,13 +389,11 @@ ScreenManager:
                     pos_hint: {'x': 0.42, 'center_y': 0.46}
                     size_hint: (0.55, 0.06)
 
-                # Linea separadora amarilla
                 MDBoxLayout:
                     size_hint: (0.88, 0.005)
                     pos_hint: {'center_x': 0.5, 'center_y': 0.38}
                     md_bg_color: 0.96, 0.65, 0.14, 1
 
-                # NSS
                 MDLabel:
                     text: "NSS: " + root.nss
                     font_style: "Body2"
@@ -383,7 +404,6 @@ ScreenManager:
                     pos_hint: {'x': 0.06, 'center_y': 0.33}
                     size_hint: (0.5, 0.06)
 
-                # Numero credencial grande
                 MDLabel:
                     text: "No. " + root.num_credencial
                     font_style: "H5"
@@ -394,7 +414,6 @@ ScreenManager:
                     pos_hint: {'center_x': 0.5, 'center_y': 0.24}
                     size_hint: (0.88, 0.08)
 
-                # Estado BLE / WiFi
                 MDLabel:
                     text: root.texto_estado_conexion
                     font_style: "Caption"
@@ -404,7 +423,6 @@ ScreenManager:
                     pos_hint: {'center_x': 0.5, 'center_y': 0.15}
                     size_hint: (0.88, 0.06)
 
-                # Icono Bluetooth animado
                 MDIcon:
                     id: icono_ble
                     icon: "bluetooth-connect"
@@ -413,7 +431,6 @@ ScreenManager:
                     font_size: "32sp"
                     pos_hint: {'center_x': 0.14, 'center_y': 0.15}
 
-                # GPS
                 MDLabel:
                     text: root.texto_gps
                     font_style: "Caption"
@@ -422,7 +439,6 @@ ScreenManager:
                     pos_hint: {'center_x': 0.5, 'center_y': 0.06}
                     size_hint: (0.88, 0.05)
 
-                # Pie de tarjeta verde
                 MDFloatLayout:
                     size_hint_y: 0.04
                     pos_hint: {'x': 0, 'y': 0}
@@ -498,7 +514,6 @@ ScreenManager:
             pos_hint: {'center_x': 0.5, 'center_y': 0.43}
             md_bg_color: 0.4, 0.25, 0.25, 1
 
-        # Aviso: solo RH puede desbloquear
         MDCard:
             size_hint: (0.88, 0.16)
             pos_hint: {'center_x': 0.5, 'center_y': 0.34}
@@ -538,7 +553,6 @@ ScreenManager:
             pos_hint: {'center_x': 0.5, 'center_y': 0.23}
             md_bg_color: 0.4, 0.25, 0.25, 1
 
-        # Selector de tipo de desbloqueo (RH elige al estar presente)
         MDLabel:
             text: "Desbloqueo autorizado por RH:"
             font_style: "Caption"
@@ -575,7 +589,6 @@ ScreenManager:
                 size_hint_x: 0.34
                 on_release: root.seleccionar_tipo('vacaciones')
 
-        # PIN RH + boton desbloquear
         MDBoxLayout:
             orientation: 'horizontal'
             size_hint: (0.88, 0.08)
@@ -607,6 +620,55 @@ ScreenManager:
 # =============================================================================
 class PantallaRegistro(Screen):
     ruta_foto_seleccionada = ""
+    _ruta_foto_camara      = ""
+
+    def tomar_foto(self):
+        if platform == 'android':
+            try:
+                from android.permissions import request_permissions, Permission
+                request_permissions([
+                    Permission.CAMERA,
+                    Permission.WRITE_EXTERNAL_STORAGE
+                ])
+                from jnius import autoclass
+                Intent         = autoclass('android.content.Intent')
+                MediaStore     = autoclass('android.provider.MediaStore')
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                File           = autoclass('java.io.File')
+                Environment    = autoclass('android.os.Environment')
+                FileProvider   = autoclass('androidx.core.content.FileProvider')
+
+                foto_dir  = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_PICTURES
+                )
+                foto_file = File(foto_dir, "agricactus_foto.jpg")
+                self._ruta_foto_camara = foto_file.getAbsolutePath()
+
+                uri = FileProvider.getUriForFile(
+                    PythonActivity.mActivity,
+                    "mx.agricactus.agricactus_trabajador.provider",
+                    foto_file
+                )
+                intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                PythonActivity.mActivity.startActivityForResult(intent, 1001)
+
+                from android import activity
+                activity.bind(on_activity_result=self._resultado_camara)
+
+            except Exception as e:
+                self.ids.label_foto.text = f"Error camara: {e}"
+        else:
+            self.ids.label_foto.text = "Camara solo disponible en Android"
+
+    def _resultado_camara(self, requestCode, resultCode, intent):
+        RESULT_OK = -1
+        if requestCode == 1001 and resultCode == RESULT_OK:
+            self.ruta_foto_seleccionada = self._ruta_foto_camara
+            self.ids.label_foto.text    = "Foto tomada correctamente"
+        else:
+            self.ids.label_foto.text = "Foto cancelada"
 
     def abrir_galeria(self):
         if GPS_DISPONIBLE:
@@ -618,21 +680,21 @@ class PantallaRegistro(Screen):
                     on_selection=self.al_seleccionar_foto
                 )
             except Exception as e:
-                self.ids.label_foto.text = f"Error al abrir galeria: {e}"
+                self.ids.label_foto.text = f"Error galeria: {e}"
         else:
             self.ids.label_foto.text = "Galeria no disponible en escritorio"
 
     def al_seleccionar_foto(self, seleccion):
         if seleccion:
             self.ruta_foto_seleccionada = seleccion[0]
-            nombre_archivo = os.path.basename(self.ruta_foto_seleccionada)
-            self.ids.label_foto.text = f"OK: {nombre_archivo}"
+            self.ids.label_foto.text    = f"OK: {os.path.basename(seleccion[0])}"
 
     def guardar_registro(self):
-        nombre     = self.ids.input_nombre.text.strip().upper()
-        nss        = self.ids.input_nss.text.strip()
-        credencial = self.ids.input_credencial.text.strip()
-        cuadrilla  = self.ids.input_cuadrilla.text.strip()
+        nombre       = self.ids.input_nombre.text.strip().upper()
+        nss          = self.ids.input_nss.text.strip()
+        credencial   = self.ids.input_credencial.text.strip()
+        cuadrilla    = self.ids.input_cuadrilla.text.strip()
+        hora_entrada = self.ids.input_hora_entrada.text.strip()
 
         errores = []
         if not nombre:
@@ -646,6 +708,15 @@ class PantallaRegistro(Screen):
         if not self.ruta_foto_seleccionada:
             errores.append("foto")
 
+        hora_int = 7
+        if hora_entrada:
+            try:
+                hora_int = int(hora_entrada.split(":")[0])
+                if not (0 <= hora_int <= 23):
+                    errores.append("hora valida (0-23)")
+            except Exception:
+                errores.append("hora en formato HH:MM")
+
         if errores:
             Snackbar(text=f"Falta: {', '.join(errores)}").open()
             return
@@ -653,7 +724,6 @@ class PantallaRegistro(Screen):
         app = MDApp.get_running_app()
         pa  = app.root.get_screen('activa')
 
-        # Formatear nombre en dos lineas
         palabras = nombre.split()
         if len(palabras) >= 3:
             nombre_fmt = f"{palabras[0]} {palabras[1]}\n{' '.join(palabras[2:])}"
@@ -676,6 +746,7 @@ class PantallaRegistro(Screen):
             "cuadrilla":         cuadrilla,
             "foto":              self.ruta_foto_seleccionada,
             "fecha_ingreso":     pa.fecha_ingreso,
+            "hora_entrada":      hora_int,
             "ultima_asistencia": datetime.datetime.now().isoformat()
         }
         guardar_datos(datos)
@@ -703,16 +774,12 @@ class PantallaActiva(Screen):
 
 
 class PantallaInactiva(Screen):
-    PIN_RH         = "RH2024"   # En produccion viene cifrado del servidor
-    motivo_bloqueo = StringProperty("3 faltas consecutivas registradas.")
-    texto_faltas   = StringProperty("Presentate a Recursos Humanos")
-    _tipo_seleccionado = "falta"   # falta | incapacidad | vacaciones
+    PIN_RH             = "RH2024"
+    motivo_bloqueo     = StringProperty("3 faltas consecutivas registradas.")
+    texto_faltas       = StringProperty("Presentate a Recursos Humanos")
+    _tipo_seleccionado = "falta"
 
     def seleccionar_tipo(self, tipo: str):
-        """
-        RH selecciona el tipo de ausencia antes de ingresar el PIN.
-        Actualiza visualmente el boton activo.
-        """
         self._tipo_seleccionado = tipo
         colores = {
             "falta":       [0.50, 0.15, 0.15, 1],
@@ -720,11 +787,9 @@ class PantallaInactiva(Screen):
             "vacaciones":  [0.18, 0.29, 0.45, 1],
         }
         apagado = [0.25, 0.25, 0.25, 1]
-
         self.ids.btn_tipo_falta.md_bg_color       = apagado
         self.ids.btn_tipo_incapacidad.md_bg_color = apagado
         self.ids.btn_tipo_vacaciones.md_bg_color  = apagado
-
         btn_map = {
             "falta":       "btn_tipo_falta",
             "incapacidad": "btn_tipo_incapacidad",
@@ -734,13 +799,6 @@ class PantallaInactiva(Screen):
         Snackbar(text=f"Tipo seleccionado: {tipo.upper()}").open()
 
     def intentar_reactivacion(self):
-        """
-        Solo RH puede desbloquear ingresando su PIN.
-        RH elige previamente el tipo:
-          - falta:       acepta las faltas, resetea contador
-          - incapacidad: justifica las ausencias como incapacidad IMSS
-          - vacaciones:  justifica como dias de vacaciones autorizados
-        """
         pin = self.ids.pin_input.text.strip()
         self.ids.pin_input.text = ""
 
@@ -748,25 +806,23 @@ class PantallaInactiva(Screen):
             Snackbar(text="PIN incorrecto. Solo RH puede desbloquear.").open()
             return
 
-        tipo = self._tipo_seleccionado
-        app  = MDApp.get_running_app()
+        tipo  = self._tipo_seleccionado
+        app   = MDApp.get_running_app()
         datos = cargar_datos()
         historial = datos.get("historial", [])
 
-        # Justificar todos los dias de falta del mes actual con el tipo elegido
         mes_hoy = mes_actual_str()
         for i, entrada in enumerate(historial):
             if (entrada.get("mes") == mes_hoy and
                     entrada.get("estatus") == "falta"):
-                historial[i]["estatus"] = tipo
+                historial[i]["estatus"]       = tipo
                 historial[i]["autorizado_rh"] = True
 
-        # Agregar dia de hoy como presente
         historial = agregar_dia_historial(historial, estatus="presente")
+        faltas    = calcular_faltas_consecutivas(historial)
 
-        faltas = calcular_faltas_consecutivas(historial)
-        datos["historial"]           = historial
-        datos["faltas_consecutivas"] = faltas
+        datos["historial"]            = historial
+        datos["faltas_consecutivas"]  = faltas
         datos["ultimo_desbloqueo_rh"] = {
             "fecha": datetime.date.today().isoformat(),
             "tipo":  tipo
@@ -781,11 +837,10 @@ class PantallaInactiva(Screen):
 
         mensajes = {
             "falta":       "Faltas aceptadas. Credencial desbloqueada.",
-            "incapacidad": "Incapacidad registrada por RH. Credencial activa.",
+            "incapacidad": "Incapacidad registrada. Credencial activa.",
             "vacaciones":  "Vacaciones registradas. Credencial activa.",
         }
         Snackbar(text=mensajes.get(tipo, "Credencial desbloqueada")).open()
-        print(f"[RH] Desbloqueo tipo '{tipo}'. Faltas restantes: {faltas}")
 
 
 # =============================================================================
@@ -799,17 +854,14 @@ class CredencialAgriCactusApp(MDApp):
 
     def build(self):
         self.advertiser = None
-
         self.theme_cls.theme_style     = "Light"
         self.theme_cls.primary_palette = "Green"
-
         controlador = Builder.load_string(KV)
         Clock.schedule_interval(self.verificar_vigencia, 30)
         Clock.schedule_interval(self.parpadear_ble, 1)
         Clock.schedule_once(self._restaurar_sesion, 0.5)
         return controlador
 
-    # ── Restaurar sesion ─────────────────────────────────────────────────────
     def _restaurar_sesion(self, dt):
         datos = cargar_datos()
         if not datos:
@@ -823,12 +875,12 @@ class CredencialAgriCactusApp(MDApp):
         pa.ruta_foto       = datos.get("foto", "")
         pa.fecha_ingreso   = datos.get("fecha_ingreso", "")
 
-        historial = datos.get("historial", [])
-        faltas    = calcular_faltas_consecutivas(historial)
+        historial  = datos.get("historial", [])
+        gracia     = en_periodo_gracia(datos)
+        faltas     = 0 if gracia else calcular_faltas_consecutivas(historial)
         pa.texto_vigencia = self._texto_vigencia(faltas)
 
         if faltas >= MAX_FALTAS:
-            # Credencial bloqueada — mostrar pantalla de bloqueo
             pi = self.root.get_screen('inactiva')
             pi.motivo_bloqueo = (
                 f"{faltas} faltas consecutivas registradas.\n"
@@ -842,8 +894,6 @@ class CredencialAgriCactusApp(MDApp):
             self.iniciar_gps()
             self.root.current = 'activa'
 
-
-    # ── GPS ──────────────────────────────────────────────────────────────────
     def iniciar_gps(self):
         if not GPS_DISPONIBLE:
             return
@@ -857,10 +907,9 @@ class CredencialAgriCactusApp(MDApp):
             print(f"[GPS] No se pudo iniciar: {e}")
 
     def _on_gps_location(self, **kwargs):
-        lat = kwargs.get('lat', 0)
-        lon = kwargs.get('lon', 0)
+        lat   = kwargs.get('lat', 0)
+        lon   = kwargs.get('lon', 0)
         texto = f"GPS: {lat:.4f}, {lon:.4f}"
-
         def _actualizar(dt):
             pa = self.root.get_screen('activa')
             pa.texto_gps = texto
@@ -868,26 +917,20 @@ class CredencialAgriCactusApp(MDApp):
             datos["lat"] = lat
             datos["lon"] = lon
             guardar_datos(datos)
-
         Clock.schedule_once(_actualizar, 0)
 
     def _on_gps_status(self, stype, status):
         print(f"[GPS] {stype}: {status}")
 
-    # ── BLE Advertiser ───────────────────────────────────────────────────────
     def encender_ble(self, numero_credencial):
         if not BLE_DISPONIBLE:
-            print("[BLE] No disponible en este dispositivo")
             return
         try:
             adaptador = BluetoothAdapter.getDefaultAdapter()
             if not (adaptador and adaptador.isEnabled()):
-                print("[BLE] Bluetooth apagado")
                 return
-
             self.advertiser = adaptador.getBluetoothLeAdvertiser()
             if not self.advertiser:
-                print("[BLE] Dispositivo no soporta BLE advertising")
                 return
 
             sb = AdvertiseSettings.Builder()
@@ -897,13 +940,11 @@ class CredencialAgriCactusApp(MDApp):
             sb.setTimeout(0)
             settings = sb.build()
 
-            # UUID incluye cuadrilla (3 digitos) + credencial (9 digitos)
-            # Formato: 0000ac10-0000-1000-8000-CCC000001001
-            # Asi el cuadrillero solo detecta trabajadores de SU cuadrilla
             pa = self.root.get_screen('activa')
-            cuadrilla_num = int(pa.num_cuadrilla) if str(pa.num_cuadrilla).isdigit() else 0
+            cuadrilla_num  = int(pa.num_cuadrilla) if str(pa.num_cuadrilla).isdigit() else 0
             credencial_num = int(numero_credencial) if str(numero_credencial).isdigit() else 9999
             uuid_str = f"0000ac10-0000-1000-8000-{cuadrilla_num:03d}{credencial_num:09d}"
+
             db = AdvertiseData.Builder()
             db.addServiceUuid(ParcelUuid(UUID.fromString(uuid_str)))
             db.setIncludeDeviceName(False)
@@ -911,7 +952,7 @@ class CredencialAgriCactusApp(MDApp):
 
             self._ble_callback = _AdvertiseCallback(
                 on_inicio=lambda: print("[BLE] Señal activa"),
-                on_falla=lambda code: print(f"[BLE] Error codigo: {code}")
+                on_falla=lambda code: print(f"[BLE] Error: {code}")
             )
             self.advertiser.startAdvertising(settings, data, self._ble_callback)
         except Exception as e:
@@ -924,17 +965,9 @@ class CredencialAgriCactusApp(MDApp):
             except Exception as e:
                 print(f"[BLE] Error al apagar: {e}")
 
-    # ── Servidor WiFi local (escucha validaciones del cuadrillero) ────────────
     def iniciar_servidor_wifi(self, credencial, cuadrilla):
-        """
-        Escucha en red WiFi local (hotspot del cuadrillero).
-        El cuadrillero envía: VALIDAR:<credencial>:<cuadrilla>:<fecha>
-        Esta app responde: OK:<credencial>
-        Al recibir validacion, renueva la asistencia por 24h.
-        """
         if self._wifi_activo:
             return
-
         self._wifi_activo = True
 
         def _escuchar():
@@ -943,33 +976,22 @@ class CredencialAgriCactusApp(MDApp):
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     sock.bind(('', PUERTO_WIFI))
                     sock.settimeout(2.0)
-                    print(f"[WIFI] Escuchando en puerto {PUERTO_WIFI}")
-
                     while self._wifi_activo:
                         try:
                             datos_raw, addr = sock.recvfrom(1024)
                             mensaje = datos_raw.decode('utf-8').strip()
-                            print(f"[WIFI] Recibido de {addr}: {mensaje}")
-
-                            partes = mensaje.split(':')
+                            partes  = mensaje.split(':')
                             if (len(partes) >= 3 and
                                     partes[0] == 'VALIDAR' and
                                     partes[1] == str(credencial)):
-
-                                # Responder confirmacion
-                                respuesta = f"OK:{credencial}".encode('utf-8')
-                                sock.sendto(respuesta, addr)
-
-                                # Actualizar asistencia en hilo principal
+                                sock.sendto(f"OK:{credencial}".encode(), addr)
                                 Clock.schedule_once(
                                     lambda dt: self._registrar_asistencia_wifi(), 0
                                 )
-
                         except socket.timeout:
                             continue
                         except Exception as e:
-                            print(f"[WIFI] Error recibiendo: {e}")
-
+                            print(f"[WIFI] Error: {e}")
             except Exception as e:
                 print(f"[WIFI] Error servidor: {e}")
             finally:
@@ -979,16 +1001,12 @@ class CredencialAgriCactusApp(MDApp):
         self._wifi_thread.start()
 
     def _registrar_asistencia_wifi(self):
-        """
-        Llamado cuando el cuadrillero valida la asistencia.
-        Marca HOY como 'presente' en el historial y recalcula faltas.
-        """
-        ahora    = datetime.datetime.now()
-        datos    = cargar_datos()
+        ahora     = datetime.datetime.now()
+        datos     = cargar_datos()
         historial = datos.get("historial", [])
         historial = agregar_dia_historial(historial, estatus="presente")
+        faltas    = calcular_faltas_consecutivas(historial)
 
-        faltas = calcular_faltas_consecutivas(historial)
         datos["historial"]           = historial
         datos["faltas_consecutivas"] = faltas
         datos["ultima_asistencia"]   = ahora.isoformat()
@@ -999,27 +1017,22 @@ class CredencialAgriCactusApp(MDApp):
         pa.color_estado          = [0.18, 0.29, 0.12, 1]
         pa.texto_vigencia        = self._texto_vigencia(faltas)
 
-        # Si estaba bloqueado y ahora tiene menos de 3 faltas, desbloquear
         if self.root.current == 'inactiva' and faltas < MAX_FALTAS:
             self.root.current = 'activa'
 
         Snackbar(text="Asistencia registrada correctamente").open()
-        print(f"[WIFI] Asistencia OK. Faltas consecutivas: {faltas}")
 
     def detener_wifi(self):
         self._wifi_activo = False
 
-    # ── Texto de vigencia legible ─────────────────────────────────────────────
     def _texto_vigencia(self, faltas: int) -> str:
-        restantes = MAX_FALTAS - faltas
         if faltas == 0:
             return "Sin faltas consecutivas"
-        elif restantes == 1:
-            return f"Atencion: 1 falta mas = bloqueo"
-        else:
-            return f"Faltas consecutivas: {faltas}/{MAX_FALTAS}"
+        restantes = MAX_FALTAS - faltas
+        if restantes == 1:
+            return "Atencion: 1 falta mas = bloqueo"
+        return f"Faltas consecutivas: {faltas}/{MAX_FALTAS}"
 
-    # ── Animacion BLE ─────────────────────────────────────────────────────────
     def parpadear_ble(self, dt):
         if self.root and self.root.current == 'activa':
             pa = self.root.get_screen('activa')
@@ -1029,26 +1042,26 @@ class CredencialAgriCactusApp(MDApp):
                 else [0.29, 0.40, 0.25, 0.4]
             )
 
-    # ── Verificar vigencia por faltas ─────────────────────────────────────────
     def verificar_vigencia(self, dt):
-        """
-        Revisa cada 30 seg si el trabajador acumulo 3 faltas consecutivas.
-        Si es dia laboral y aun no hay asistencia hoy, lo registra como falta.
-        """
         datos     = cargar_datos()
         historial = datos.get("historial", [])
         hoy       = datetime.date.today()
+        ahora     = datetime.datetime.now()
 
-        # Si es dia laboral y no hay entrada de hoy, registrar falta provisional
-        dias_ok = {e.get("fecha") for e in historial}
-        if es_dia_laboral(hoy) and hoy.isoformat() not in dias_ok:
-            # Solo marcar falta si ya paso la hora de entrada (ej: despues de 8am)
-            if datetime.datetime.now().hour >= 8:
-                historial = agregar_dia_historial(historial, estatus="falta")
-                datos["historial"] = historial
-                guardar_datos(datos)
+        gracia = en_periodo_gracia(datos)
 
-        faltas = calcular_faltas_consecutivas(historial)
+        if not gracia:
+            hora_entrada = datos.get("hora_entrada", 7)
+            hora_limite  = hora_entrada + TOLERANCIA_HORAS
+            dias_ok      = {e.get("fecha") for e in historial}
+
+            if es_dia_laboral(hoy) and hoy.isoformat() not in dias_ok:
+                if ahora.hour >= hora_limite:
+                    historial = agregar_dia_historial(historial, estatus="falta")
+                    datos["historial"] = historial
+                    guardar_datos(datos)
+
+        faltas = 0 if gracia else calcular_faltas_consecutivas(historial)
         pa     = self.root.get_screen('activa')
 
         if faltas >= MAX_FALTAS:
@@ -1057,12 +1070,10 @@ class CredencialAgriCactusApp(MDApp):
             if self.root.current != 'inactiva':
                 pi = self.root.get_screen('inactiva')
                 pi.motivo_bloqueo = (
-                    f"{faltas} faltas consecutivas registradas este mes.\n"
+                    f"{faltas} faltas consecutivas registradas.\n"
                     "Presentate a Recursos Humanos para regularizar."
                 )
-                pi.texto_faltas = (
-                    f"Faltas del mes: {contar_faltas_mes(historial)}"
-                )
+                pi.texto_faltas = f"Faltas del mes: {contar_faltas_mes(historial)}"
                 self.root.current = 'inactiva'
         else:
             if self.root.current == 'activa':
