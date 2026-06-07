@@ -30,10 +30,20 @@ jobs:
             git zip unzip \
             autoconf libtool pkg-config \
             zlib1g-dev cmake libffi-dev \
-            libssl-dev nasm
+            libssl-dev nasm \
+            libltdl-dev
 
       - name: Install buildozer
         run: pip install buildozer cython
+
+      # ✅ Caché para evitar recompilar SDL2 y NDK cada vez
+      - name: Cache buildozer
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
 
       - name: Setup Android SDK and licenses
         run: |
@@ -47,19 +57,24 @@ jobs:
           echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > $SDK/licenses/android-sdk-license
           echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> $SDK/licenses/android-sdk-license
           echo "8933bad161af4178b1185d1a37fbf41ea5269c55" >> $SDK/licenses/android-sdk-license
-          $SDK/cmdline-tools/latest/bin/sdkmanager --sdk_root=$SDK "build-tools;33.0.2" "platforms;android-33" "platform-tools"
+          $SDK/cmdline-tools/latest/bin/sdkmanager \
+            --sdk_root=$SDK \
+            "build-tools;33.0.2" \
+            "platforms;android-33" \
+            "platform-tools"
           mkdir -p $SDK/tools/bin
           ln -sf $SDK/cmdline-tools/latest/bin/sdkmanager $SDK/tools/bin/sdkmanager
           java -version
 
-     - name: Build APK
+      # ✅ Indentación corregida, sin || true para ver el error real
+      - name: Build APK
         run: |
-          buildozer android debug 2>&1 | tee build_output.log || true
-          echo "=== ULTIMAS 50 LINEAS ==="
-          tail -50 build_output.log
+          buildozer android debug 2>&1 | tee build_output.log
+          echo "=== ULTIMAS 100 LINEAS ==="
+          tail -100 build_output.log
           echo "=== ERRORES ==="
-          grep -i "error\|exception\|failed\|traceback" build_output.log | grep -v "DEBUG\|test_" | tail -20
-          ls -la bin/ 2>/dev/null || echo "No hay APK generado"
+          grep -i "error\|exception\|failed\|traceback" build_output.log \
+            | grep -v "DEBUG\|test_" | tail -30
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
