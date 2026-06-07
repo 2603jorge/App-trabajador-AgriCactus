@@ -36,7 +36,6 @@ jobs:
       - name: Install buildozer
         run: pip install buildozer cython
 
-      # ✅ Caché para evitar recompilar SDL2 y NDK cada vez
       - name: Cache buildozer
         uses: actions/cache@v4
         with:
@@ -66,18 +65,26 @@ jobs:
           ln -sf $SDK/cmdline-tools/latest/bin/sdkmanager $SDK/tools/bin/sdkmanager
           java -version
 
-      # ✅ Indentación corregida, sin || true para ver el error real
       - name: Build APK
         run: |
+          set -o pipefail
           buildozer android debug 2>&1 | tee build_output.log
+          echo "=== APK generado? ==="
+          find . -name "*.apk" 2>/dev/null || echo "No APK encontrado"
           echo "=== ULTIMAS 100 LINEAS ==="
           tail -100 build_output.log
-          echo "=== ERRORES ==="
-          grep -i "error\|exception\|failed\|traceback" build_output.log \
-            | grep -v "DEBUG\|test_" | tail -30
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: build_output.log
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: agricactus-trabajador-debug
           path: bin/*.apk
+          if-no-files-found: warn
