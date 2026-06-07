@@ -8,16 +8,6 @@ source.include_exts = py,png,jpg,jpeg,kv,json
 
 version = 2.0
 
-# Dependencias - versiones compatibles con python-for-android
-[app]
-title = AgriCactus Trabajador
-package.name = agricactus_trabajador
-package.domain = mx.agricactus
-
-source.dir = .
-source.include_exts = py,png,jpg,jpeg,kv,json
-
-version = 2.0
 
 # Dependencias - versiones compatibles con python-for-android
 requirements = python3,kivy==2.3.0,kivymd==1.2.0,plyer,pillow,android,pyjnius
