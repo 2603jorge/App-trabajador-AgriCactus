@@ -48,8 +48,6 @@ jobs:
         run: |
           SDK=$HOME/.buildozer/android/platform/android-sdk
           mkdir -p $SDK/cmdline-tools
-
-          # ✅ Solo instalar si NO existe ya (evita error con caché)
           if [ ! -f "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
             echo "Instalando cmdline-tools..."
             curl -s https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdtools.zip
@@ -59,21 +57,24 @@ jobs:
           else
             echo "cmdline-tools ya existe, saltando instalación."
           fi
-
           mkdir -p $SDK/licenses
           echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > $SDK/licenses/android-sdk-license
           echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> $SDK/licenses/android-sdk-license
           echo "8933bad161af4178b1185d1a37fbf41ea5269c55" >> $SDK/licenses/android-sdk-license
-
           $SDK/cmdline-tools/latest/bin/sdkmanager \
             --sdk_root=$SDK \
             "build-tools;33.0.2" \
             "platforms;android-33" \
             "platform-tools"
-
           mkdir -p $SDK/tools/bin
           ln -sf $SDK/cmdline-tools/latest/bin/sdkmanager $SDK/tools/bin/sdkmanager
           java -version
+
+      - name: Limpiar build anterior
+        run: |
+          rm -rf .buildozer/android/platform/build-arm64-v8a/build/python-installs
+          rm -rf .buildozer/android/platform/build-arm64-v8a/dists
+        continue-on-error: true
 
       - name: Build APK
         run: |
