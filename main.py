@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v2.1 - Cámara, hora de entrada configurable, días de gracia
+#  v2.2 - Fix faltas, fecha_inicio_conteo, camara
 # =============================================================================
 
 import datetime
@@ -11,7 +11,7 @@ import threading
 
 from kivy.lang import Builder
 from kivy.clock import Clock
-from kivy.properties import StringProperty, BooleanProperty, ListProperty, NumericProperty
+from kivy.properties import StringProperty, BooleanProperty, ListProperty
 from kivy.uix.screenmanager import Screen, FadeTransition
 from kivy.utils import platform
 from kivymd.app import MDApp
@@ -98,6 +98,20 @@ def es_dia_laboral(fecha: datetime.date) -> bool:
     return fecha.weekday() in DIAS_LABORALES
 
 def calcular_faltas_consecutivas(historial: list) -> int:
+    # Sin historial = empleado nuevo, cero faltas
+    if not historial:
+        return 0
+
+    # Leer fecha de inicio de conteo (se resetea al registrar o al desbloquear)
+    datos_guardados = cargar_datos()
+    fecha_inicio_conteo = None
+    fic_str = datos_guardados.get("fecha_inicio_conteo", "")
+    if fic_str:
+        try:
+            fecha_inicio_conteo = datetime.date.fromisoformat(fic_str)
+        except Exception:
+            pass
+
     dias_ok = set()
     for entrada in historial:
         f_str   = entrada.get("fecha", "")
@@ -108,9 +122,17 @@ def calcular_faltas_consecutivas(historial: list) -> int:
             except Exception:
                 pass
 
+    # Si no hay ningún día OK, no hay faltas que contar
+    if not dias_ok:
+        return 0
+
     faltas = 0
     fecha  = datetime.date.today() - datetime.timedelta(days=1)
+
     for _ in range(60):
+        # No retroceder más allá del inicio de conteo
+        if fecha_inicio_conteo and fecha < fecha_inicio_conteo:
+            break
         if not es_dia_laboral(fecha):
             fecha -= datetime.timedelta(days=1)
             continue
@@ -168,16 +190,12 @@ ScreenManager:
     PantallaInactiva:
 
 
-# ═══════════════════════════════════════════════════════
-#  PANTALLA 1: REGISTRO
-# ═══════════════════════════════════════════════════════
 <PantallaRegistro>:
     name: 'registro'
 
     MDFloatLayout:
         md_bg_color: 0.96, 0.96, 0.94, 1
 
-        # Encabezado verde
         MDFloatLayout:
             size_hint_y: 0.15
             pos_hint: {'x': 0, 'top': 1}
@@ -200,13 +218,11 @@ ScreenManager:
                 pos_hint: {'center_x': 0.64, 'center_y': 0.5}
                 size_hint: (0.6, 1)
 
-        # Franja amarilla
         MDBoxLayout:
             size_hint_y: 0.006
             pos_hint: {'x': 0, 'top': 0.85}
             md_bg_color: 0.96, 0.65, 0.14, 1
 
-        # Nombre
         MDTextField:
             id: input_nombre
             hint_text: "Nombre Completo"
@@ -216,7 +232,6 @@ ScreenManager:
             pos_hint: {'center_x': 0.5, 'center_y': 0.76}
             size_hint_x: 0.88
 
-        # NSS
         MDTextField:
             id: input_nss
             hint_text: "Numero de Seguro Social (NSS)"
@@ -226,7 +241,6 @@ ScreenManager:
             pos_hint: {'center_x': 0.5, 'center_y': 0.65}
             size_hint_x: 0.88
 
-        # Credencial
         MDTextField:
             id: input_credencial
             hint_text: "Numero de Credencial / Empleado"
@@ -235,7 +249,6 @@ ScreenManager:
             pos_hint: {'center_x': 0.5, 'center_y': 0.55}
             size_hint_x: 0.88
 
-        # Cuadrilla
         MDTextField:
             id: input_cuadrilla
             hint_text: "Numero de Cuadrilla"
@@ -244,7 +257,6 @@ ScreenManager:
             pos_hint: {'center_x': 0.5, 'center_y': 0.45}
             size_hint_x: 0.88
 
-        # Hora de entrada
         MDTextField:
             id: input_hora_entrada
             hint_text: "Hora de entrada (ej: 07:00)"
@@ -254,7 +266,6 @@ ScreenManager:
             pos_hint: {'center_x': 0.5, 'center_y': 0.35}
             size_hint_x: 0.88
 
-        # Botones foto
         MDBoxLayout:
             orientation: 'horizontal'
             size_hint: (0.88, 0.07)
@@ -288,7 +299,6 @@ ScreenManager:
             text_color: 0.5, 0.5, 0.5, 1
             pos_hint: {'center_x': 0.5, 'center_y': 0.17}
 
-        # Boton guardar
         MDRaisedButton:
             text: "GENERAR CREDENCIAL DIGITAL"
             md_bg_color: 0.18, 0.29, 0.12, 1
@@ -298,9 +308,6 @@ ScreenManager:
             on_release: root.guardar_registro()
 
 
-# ═══════════════════════════════════════════════════════
-#  PANTALLA 2: CREDENCIAL ACTIVA
-# ═══════════════════════════════════════════════════════
 <PantallaActiva>:
     name: 'activa'
 
@@ -451,9 +458,6 @@ ScreenManager:
                         text_color: 0.8, 0.9, 0.8, 1
 
 
-# ═══════════════════════════════════════════════════════
-#  PANTALLA 3: CREDENCIAL BLOQUEADA
-# ═══════════════════════════════════════════════════════
 <PantallaInactiva>:
     name: 'inactiva'
 
@@ -740,14 +744,15 @@ class PantallaRegistro(Screen):
         pa.fecha_ingreso   = datetime.date.today().strftime("%d/%m/%Y")
 
         datos = {
-            "nombre":            nombre_fmt,
-            "nss":               nss,
-            "credencial":        credencial,
-            "cuadrilla":         cuadrilla,
-            "foto":              self.ruta_foto_seleccionada,
-            "fecha_ingreso":     pa.fecha_ingreso,
-            "hora_entrada":      hora_int,
-            "ultima_asistencia": datetime.datetime.now().isoformat()
+            "nombre":               nombre_fmt,
+            "nss":                  nss,
+            "credencial":           credencial,
+            "cuadrilla":            cuadrilla,
+            "foto":                 self.ruta_foto_seleccionada,
+            "fecha_ingreso":        pa.fecha_ingreso,
+            "hora_entrada":         hora_int,
+            "fecha_inicio_conteo":  datetime.date.today().isoformat(),
+            "ultima_asistencia":    datetime.datetime.now().isoformat()
         }
         guardar_datos(datos)
 
@@ -765,7 +770,7 @@ class PantallaActiva(Screen):
     nss                   = StringProperty("")
     num_credencial        = StringProperty("")
     num_cuadrilla         = StringProperty("")
-    texto_vigencia        = StringProperty("Vigencia: activa")
+    texto_vigencia        = StringProperty("Sin faltas consecutivas")
     ruta_foto             = StringProperty("")
     color_icono_ble       = ListProperty([0.96, 0.65, 0.14, 1])
     texto_gps             = StringProperty("GPS: sin senal")
@@ -811,6 +816,7 @@ class PantallaInactiva(Screen):
         datos = cargar_datos()
         historial = datos.get("historial", [])
 
+        # Justificar faltas del mes actual con el tipo elegido
         mes_hoy = mes_actual_str()
         for i, entrada in enumerate(historial):
             if (entrada.get("mes") == mes_hoy and
@@ -818,17 +824,20 @@ class PantallaInactiva(Screen):
                 historial[i]["estatus"]       = tipo
                 historial[i]["autorizado_rh"] = True
 
+        # Marcar hoy como presente
         historial = agregar_dia_historial(historial, estatus="presente")
-        faltas    = calcular_faltas_consecutivas(historial)
 
+        # Resetear fecha de inicio de conteo a HOY para evitar rebloqueo
         datos["historial"]            = historial
-        datos["faltas_consecutivas"]  = faltas
+        datos["fecha_inicio_conteo"]  = datetime.date.today().isoformat()
+        datos["faltas_consecutivas"]  = 0
         datos["ultimo_desbloqueo_rh"] = {
             "fecha": datetime.date.today().isoformat(),
             "tipo":  tipo
         }
         guardar_datos(datos)
 
+        faltas = calcular_faltas_consecutivas(historial)
         pa = app.root.get_screen('activa')
         pa.texto_vigencia = app._texto_vigencia(faltas)
         app.encender_ble(pa.num_credencial)
@@ -875,9 +884,9 @@ class CredencialAgriCactusApp(MDApp):
         pa.ruta_foto       = datos.get("foto", "")
         pa.fecha_ingreso   = datos.get("fecha_ingreso", "")
 
-        historial  = datos.get("historial", [])
-        gracia     = en_periodo_gracia(datos)
-        faltas     = 0 if gracia else calcular_faltas_consecutivas(historial)
+        historial = datos.get("historial", [])
+        gracia    = en_periodo_gracia(datos)
+        faltas    = 0 if gracia else calcular_faltas_consecutivas(historial)
         pa.texto_vigencia = self._texto_vigencia(faltas)
 
         if faltas >= MAX_FALTAS:
