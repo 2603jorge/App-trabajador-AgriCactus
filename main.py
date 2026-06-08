@@ -626,43 +626,72 @@ class PantallaRegistro(Screen):
     ruta_foto_seleccionada = ""
     _ruta_foto_camara      = ""
 
-    def tomar_foto(self):
-        if platform == 'android':
-            try:
-                from android.permissions import request_permissions, Permission
-                request_permissions([
-                    Permission.CAMERA,
-                    Permission.WRITE_EXTERNAL_STORAGE
-                ])
-                from jnius import autoclass
-                Intent         = autoclass('android.content.Intent')
-                MediaStore     = autoclass('android.provider.MediaStore')
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                File           = autoclass('java.io.File')
-                Environment    = autoclass('android.os.Environment')
-                FileProvider   = autoclass('androidx.core.content.FileProvider')
+   def tomar_foto(self):
+    if platform == 'android':
+        try:
+            from android.permissions import request_permissions, Permission, check_permission
+            from android import activity
 
-                foto_dir  = Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_PICTURES
-                )
-                foto_file = File(foto_dir, "agricactus_foto.jpg")
-                self._ruta_foto_camara = foto_file.getAbsolutePath()
+            # Solicitar permisos
+            request_permissions([
+                Permission.CAMERA,
+                Permission.WRITE_EXTERNAL_STORAGE,
+                Permission.READ_EXTERNAL_STORAGE
+            ])
 
-                uri = FileProvider.getUriForFile(
-                    PythonActivity.mActivity,
-                    "mx.agricactus.agricactus_trabajador.provider",
-                    foto_file
-                )
-                intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
-                intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                PythonActivity.mActivity.startActivityForResult(intent, 1001)
+            from jnius import autoclass
+            Intent         = autoclass('android.content.Intent')
+            MediaStore     = autoclass('android.provider.MediaStore')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
 
-                from android import activity
-                activity.bind(on_activity_result=self._resultado_camara)
+            # Usar directorio interno de la app (no necesita FileProvider)
+            context    = PythonActivity.mActivity
+            files_dir  = context.getFilesDir().getAbsolutePath()
+            self._ruta_foto_camara = f"{files_dir}/agricactus_foto.jpg"
 
-            except Exception as e:
-                self.ids.label_foto.text = f"Error camara: {e}"
+            intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            # Sin EXTRA_OUTPUT: la foto va al thumbnail de la cámara
+            # Es más compatible y no necesita FileProvider
+            PythonActivity.mActivity.startActivityForResult(intent, 1001)
+            activity.bind(on_activity_result=self._resultado_camara)
+
+        except Exception as e:
+            self.ids.label_foto.text = f"Error camara: {e}"
+    else:
+        self.ids.label_foto.text = "Camara solo disponible en Android"
+
+def _resultado_camara(self, requestCode, resultCode, intent):
+    RESULT_OK = -1
+    if requestCode != 1001 or resultCode != RESULT_OK:
+        self.ids.label_foto.text = "Foto cancelada"
+        return
+
+    try:
+        from jnius import autoclass
+        # Obtener thumbnail de la foto
+        extras    = intent.getExtras()
+        Bitmap    = autoclass('android.graphics.Bitmap')
+        bitmap    = extras.get("data")
+
+        # Guardar bitmap como archivo JPG
+        FileOutputStream = autoclass('java.io.FileOutputStream')
+        BitmapCompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+
+        from jnius import autoclass
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        context        = PythonActivity.mActivity
+        files_dir      = context.getFilesDir().getAbsolutePath()
+        ruta           = f"{files_dir}/agricactus_foto.jpg"
+
+        fos = FileOutputStream(ruta)
+        bitmap.compress(BitmapCompressFormat.JPEG, 90, fos)
+        fos.close()
+
+        self.ruta_foto_seleccionada = ruta
+        self.ids.label_foto.text    = "Foto tomada correctamente"
+
+    except Exception as e:
+        self.ids.label_foto.text = f"Error guardando foto: {e}"
         else:
             self.ids.label_foto.text = "Camara solo disponible en Android"
 
