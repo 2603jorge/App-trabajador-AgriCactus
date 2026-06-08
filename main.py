@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v2.2 - Fix faltas, fecha_inicio_conteo, camara
+#  v2.3 - Camara sin FileProvider, fix faltas
 # =============================================================================
 
 import datetime
@@ -60,11 +60,6 @@ else:
 # =============================================================================
 #  CONSTANTES
 # =============================================================================
-VERDE_OSCURO     = (0.18, 0.29, 0.12, 1)
-VERDE_MEDIO      = (0.29, 0.40, 0.25, 1)
-AMARILLO         = (0.96, 0.65, 0.14, 1)
-FONDO_GRIS       = (0.96, 0.96, 0.94, 1)
-
 ARCHIVO_DATOS    = "empleado_data.json"
 PUERTO_WIFI      = 45678
 MAX_FALTAS       = 3
@@ -98,11 +93,9 @@ def es_dia_laboral(fecha: datetime.date) -> bool:
     return fecha.weekday() in DIAS_LABORALES
 
 def calcular_faltas_consecutivas(historial: list) -> int:
-    # Sin historial = empleado nuevo, cero faltas
     if not historial:
         return 0
 
-    # Leer fecha de inicio de conteo (se resetea al registrar o al desbloquear)
     datos_guardados = cargar_datos()
     fecha_inicio_conteo = None
     fic_str = datos_guardados.get("fecha_inicio_conteo", "")
@@ -122,7 +115,6 @@ def calcular_faltas_consecutivas(historial: list) -> int:
             except Exception:
                 pass
 
-    # Si no hay ningún día OK, no hay faltas que contar
     if not dias_ok:
         return 0
 
@@ -130,7 +122,6 @@ def calcular_faltas_consecutivas(historial: list) -> int:
     fecha  = datetime.date.today() - datetime.timedelta(days=1)
 
     for _ in range(60):
-        # No retroceder más allá del inicio de conteo
         if fecha_inicio_conteo and fecha < fecha_inicio_conteo:
             break
         if not es_dia_laboral(fecha):
@@ -626,82 +617,60 @@ class PantallaRegistro(Screen):
     ruta_foto_seleccionada = ""
     _ruta_foto_camara      = ""
 
-   def tomar_foto(self):
-    if platform == 'android':
-        try:
-            from android.permissions import request_permissions, Permission, check_permission
-            from android import activity
+    def tomar_foto(self):
+        if platform == 'android':
+            try:
+                from android.permissions import request_permissions, Permission
+                from android import activity as android_activity
+                from jnius import autoclass
 
-            # Solicitar permisos
-            request_permissions([
-                Permission.CAMERA,
-                Permission.WRITE_EXTERNAL_STORAGE,
-                Permission.READ_EXTERNAL_STORAGE
-            ])
+                request_permissions([
+                    Permission.CAMERA,
+                    Permission.WRITE_EXTERNAL_STORAGE,
+                    Permission.READ_EXTERNAL_STORAGE
+                ])
 
-            from jnius import autoclass
-            Intent         = autoclass('android.content.Intent')
-            MediaStore     = autoclass('android.provider.MediaStore')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Intent         = autoclass('android.content.Intent')
+                MediaStore     = autoclass('android.provider.MediaStore')
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
 
-            # Usar directorio interno de la app (no necesita FileProvider)
-            context    = PythonActivity.mActivity
-            files_dir  = context.getFilesDir().getAbsolutePath()
-            self._ruta_foto_camara = f"{files_dir}/agricactus_foto.jpg"
+                intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                PythonActivity.mActivity.startActivityForResult(intent, 1001)
+                android_activity.bind(on_activity_result=self._resultado_camara)
 
-            intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-            # Sin EXTRA_OUTPUT: la foto va al thumbnail de la cámara
-            # Es más compatible y no necesita FileProvider
-            PythonActivity.mActivity.startActivityForResult(intent, 1001)
-            activity.bind(on_activity_result=self._resultado_camara)
-
-        except Exception as e:
-            self.ids.label_foto.text = f"Error camara: {e}"
-    else:
-        self.ids.label_foto.text = "Camara solo disponible en Android"
-
-def _resultado_camara(self, requestCode, resultCode, intent):
-    RESULT_OK = -1
-    if requestCode != 1001 or resultCode != RESULT_OK:
-        self.ids.label_foto.text = "Foto cancelada"
-        return
-
-    try:
-        from jnius import autoclass
-        # Obtener thumbnail de la foto
-        extras    = intent.getExtras()
-        Bitmap    = autoclass('android.graphics.Bitmap')
-        bitmap    = extras.get("data")
-
-        # Guardar bitmap como archivo JPG
-        FileOutputStream = autoclass('java.io.FileOutputStream')
-        BitmapCompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-
-        from jnius import autoclass
-        PythonActivity = autoclass('org.kivy.android.PythonActivity')
-        context        = PythonActivity.mActivity
-        files_dir      = context.getFilesDir().getAbsolutePath()
-        ruta           = f"{files_dir}/agricactus_foto.jpg"
-
-        fos = FileOutputStream(ruta)
-        bitmap.compress(BitmapCompressFormat.JPEG, 90, fos)
-        fos.close()
-
-        self.ruta_foto_seleccionada = ruta
-        self.ids.label_foto.text    = "Foto tomada correctamente"
-
-    except Exception as e:
-        self.ids.label_foto.text = f"Error guardando foto: {e}"
+            except Exception as e:
+                self.ids.label_foto.text = f"Error camara: {e}"
         else:
             self.ids.label_foto.text = "Camara solo disponible en Android"
 
     def _resultado_camara(self, requestCode, resultCode, intent):
         RESULT_OK = -1
-        if requestCode == 1001 and resultCode == RESULT_OK:
-            self.ruta_foto_seleccionada = self._ruta_foto_camara
-            self.ids.label_foto.text    = "Foto tomada correctamente"
-        else:
+        if requestCode != 1001 or resultCode != RESULT_OK:
             self.ids.label_foto.text = "Foto cancelada"
+            return
+        try:
+            from jnius import autoclass
+            PythonActivity       = autoclass('org.kivy.android.PythonActivity')
+            FileOutputStream     = autoclass('java.io.FileOutputStream')
+            BitmapCompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+
+            # Obtener thumbnail del bundle
+            extras = intent.getExtras()
+            bitmap = extras.get("data")
+
+            # Guardar en directorio interno de la app
+            files_dir = PythonActivity.mActivity.getFilesDir().getAbsolutePath()
+            ruta      = f"{files_dir}/agricactus_foto.jpg"
+
+            fos = FileOutputStream(ruta)
+            bitmap.compress(BitmapCompressFormat.JPEG, 90, fos)
+            fos.close()
+
+            self.ruta_foto_seleccionada = ruta
+            self.ids.label_foto.text    = "Foto tomada correctamente"
+
+        except Exception as e:
+            self.ids.label_foto.text = f"Error guardando foto: {e}"
 
     def abrir_galeria(self):
         if GPS_DISPONIBLE:
@@ -773,15 +742,15 @@ def _resultado_camara(self, requestCode, resultCode, intent):
         pa.fecha_ingreso   = datetime.date.today().strftime("%d/%m/%Y")
 
         datos = {
-            "nombre":               nombre_fmt,
-            "nss":                  nss,
-            "credencial":           credencial,
-            "cuadrilla":            cuadrilla,
-            "foto":                 self.ruta_foto_seleccionada,
-            "fecha_ingreso":        pa.fecha_ingreso,
-            "hora_entrada":         hora_int,
-            "fecha_inicio_conteo":  datetime.date.today().isoformat(),
-            "ultima_asistencia":    datetime.datetime.now().isoformat()
+            "nombre":              nombre_fmt,
+            "nss":                 nss,
+            "credencial":          credencial,
+            "cuadrilla":           cuadrilla,
+            "foto":                self.ruta_foto_seleccionada,
+            "fecha_ingreso":       pa.fecha_ingreso,
+            "hora_entrada":        hora_int,
+            "fecha_inicio_conteo": datetime.date.today().isoformat(),
+            "ultima_asistencia":   datetime.datetime.now().isoformat()
         }
         guardar_datos(datos)
 
@@ -845,7 +814,6 @@ class PantallaInactiva(Screen):
         datos = cargar_datos()
         historial = datos.get("historial", [])
 
-        # Justificar faltas del mes actual con el tipo elegido
         mes_hoy = mes_actual_str()
         for i, entrada in enumerate(historial):
             if (entrada.get("mes") == mes_hoy and
@@ -853,10 +821,8 @@ class PantallaInactiva(Screen):
                 historial[i]["estatus"]       = tipo
                 historial[i]["autorizado_rh"] = True
 
-        # Marcar hoy como presente
         historial = agregar_dia_historial(historial, estatus="presente")
 
-        # Resetear fecha de inicio de conteo a HOY para evitar rebloqueo
         datos["historial"]            = historial
         datos["fecha_inicio_conteo"]  = datetime.date.today().isoformat()
         datos["faltas_consecutivas"]  = 0
