@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v2.4 - Fix BLUETOOTH_ADVERTISE Android 12+
+#  v2.5 - Test BLE diagnóstico
 # =============================================================================
 
 import datetime
@@ -95,7 +95,6 @@ def es_dia_laboral(fecha: datetime.date) -> bool:
 def calcular_faltas_consecutivas(historial: list) -> int:
     if not historial:
         return 0
-
     datos_guardados = cargar_datos()
     fecha_inicio_conteo = None
     fic_str = datos_guardados.get("fecha_inicio_conteo", "")
@@ -104,7 +103,6 @@ def calcular_faltas_consecutivas(historial: list) -> int:
             fecha_inicio_conteo = datetime.date.fromisoformat(fic_str)
         except Exception:
             pass
-
     dias_ok = set()
     for entrada in historial:
         f_str   = entrada.get("fecha", "")
@@ -114,13 +112,10 @@ def calcular_faltas_consecutivas(historial: list) -> int:
                 dias_ok.add(datetime.date.fromisoformat(f_str))
             except Exception:
                 pass
-
     if not dias_ok:
         return 0
-
     faltas = 0
     fecha  = datetime.date.today() - datetime.timedelta(days=1)
-
     for _ in range(60):
         if fecha_inicio_conteo and fecha < fecha_inicio_conteo:
             break
@@ -434,8 +429,16 @@ ScreenManager:
                     font_style: "Caption"
                     halign: "center"
                     theme_text_color: "Secondary"
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.06}
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.09}
                     size_hint: (0.88, 0.05)
+
+                MDRaisedButton:
+                    text: "TEST BLE"
+                    md_bg_color: 0.96, 0.65, 0.14, 1
+                    text_color: 0.18, 0.29, 0.12, 1
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.05}
+                    size_hint: (0.5, 0.05)
+                    on_release: app.test_ble()
 
                 MDFloatLayout:
                     size_hint_y: 0.04
@@ -623,21 +626,17 @@ class PantallaRegistro(Screen):
                 from android.permissions import request_permissions, Permission
                 from android import activity as android_activity
                 from jnius import autoclass
-
                 request_permissions([
                     Permission.CAMERA,
                     Permission.WRITE_EXTERNAL_STORAGE,
                     Permission.READ_EXTERNAL_STORAGE
                 ])
-
                 Intent         = autoclass('android.content.Intent')
                 MediaStore     = autoclass('android.provider.MediaStore')
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
-
                 intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
                 PythonActivity.mActivity.startActivityForResult(intent, 1001)
                 android_activity.bind(on_activity_result=self._resultado_camara)
-
             except Exception as e:
                 self.ids.label_foto.text = f"Error camara: {e}"
         else:
@@ -653,19 +652,15 @@ class PantallaRegistro(Screen):
             PythonActivity       = autoclass('org.kivy.android.PythonActivity')
             FileOutputStream     = autoclass('java.io.FileOutputStream')
             BitmapCompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-
             extras    = intent.getExtras()
             bitmap    = extras.get("data")
             files_dir = PythonActivity.mActivity.getFilesDir().getAbsolutePath()
             ruta      = f"{files_dir}/agricactus_foto.jpg"
-
             fos = FileOutputStream(ruta)
             bitmap.compress(BitmapCompressFormat.JPEG, 90, fos)
             fos.close()
-
             self.ruta_foto_seleccionada = ruta
             self.ids.label_foto.text    = "Foto tomada correctamente"
-
         except Exception as e:
             self.ids.label_foto.text = f"Error guardando foto: {e}"
 
@@ -801,25 +796,20 @@ class PantallaInactiva(Screen):
     def intentar_reactivacion(self):
         pin = self.ids.pin_input.text.strip()
         self.ids.pin_input.text = ""
-
         if pin != self.PIN_RH:
             Snackbar(text="PIN incorrecto. Solo RH puede desbloquear.").open()
             return
-
         tipo  = self._tipo_seleccionado
         app   = MDApp.get_running_app()
         datos = cargar_datos()
         historial = datos.get("historial", [])
-
         mes_hoy = mes_actual_str()
         for i, entrada in enumerate(historial):
             if (entrada.get("mes") == mes_hoy and
                     entrada.get("estatus") == "falta"):
                 historial[i]["estatus"]       = tipo
                 historial[i]["autorizado_rh"] = True
-
         historial = agregar_dia_historial(historial, estatus="presente")
-
         datos["historial"]            = historial
         datos["fecha_inicio_conteo"]  = datetime.date.today().isoformat()
         datos["faltas_consecutivas"]  = 0
@@ -828,14 +818,12 @@ class PantallaInactiva(Screen):
             "tipo":  tipo
         }
         guardar_datos(datos)
-
         faltas = calcular_faltas_consecutivas(historial)
         pa = app.root.get_screen('activa')
         pa.texto_vigencia = app._texto_vigencia(faltas)
         app.encender_ble(pa.num_credencial)
         app.iniciar_servidor_wifi(pa.num_credencial, pa.num_cuadrilla)
         app.root.current = 'activa'
-
         mensajes = {
             "falta":       "Faltas aceptadas. Credencial desbloqueada.",
             "incapacidad": "Incapacidad registrada. Credencial activa.",
@@ -867,7 +855,6 @@ class CredencialAgriCactusApp(MDApp):
         datos = cargar_datos()
         if not datos:
             return
-
         pa = self.root.get_screen('activa')
         pa.nombre_empleado = datos.get("nombre", "")
         pa.nss             = datos.get("nss", "")
@@ -875,12 +862,10 @@ class CredencialAgriCactusApp(MDApp):
         pa.num_cuadrilla   = datos.get("cuadrilla", "")
         pa.ruta_foto       = datos.get("foto", "")
         pa.fecha_ingreso   = datos.get("fecha_ingreso", "")
-
         historial = datos.get("historial", [])
         gracia    = en_periodo_gracia(datos)
         faltas    = 0 if gracia else calcular_faltas_consecutivas(historial)
         pa.texto_vigencia = self._texto_vigencia(faltas)
-
         if faltas >= MAX_FALTAS:
             pi = self.root.get_screen('inactiva')
             pi.motivo_bloqueo = (
@@ -923,11 +908,24 @@ class CredencialAgriCactusApp(MDApp):
     def _on_gps_status(self, stype, status):
         print(f"[GPS] {stype}: {status}")
 
+    def test_ble(self):
+        pa           = self.root.get_screen('activa')
+        cred         = pa.num_credencial
+        cuad         = pa.num_cuadrilla
+        advertiser_ok = self.advertiser is not None
+        ble_ok       = BLE_DISPONIBLE
+        try:
+            uuid_tail = f"{int(cuad):03d}{int(cred):09d}" if cred and cuad else "sin_datos"
+        except Exception:
+            uuid_tail = "error"
+        msg = f"BLE:{ble_ok} ADV:{advertiser_ok} UUID:...{uuid_tail}"
+        Snackbar(text=msg).open()
+        print(f"[TEST TRABAJADOR] {msg}")
+
     def encender_ble(self, numero_credencial):
         if not BLE_DISPONIBLE:
             return
         try:
-            # ✅ Verificar permisos BLE en Android 12+
             if platform == 'android':
                 from android.permissions import request_permissions, Permission, check_permission
                 from jnius import autoclass as _ac
@@ -944,7 +942,7 @@ class CredencialAgriCactusApp(MDApp):
                                     lambda dt: self.encender_ble(numero_credencial), 0.5
                                 )
                             else:
-                                print("[BLE] Permisos denegados")
+                                print("[BLE] Permisos ADVERTISE denegados")
                         request_permissions(permisos, _on_permisos)
                         return
 
@@ -973,11 +971,11 @@ class CredencialAgriCactusApp(MDApp):
             data = db.build()
 
             self._ble_callback = _AdvertiseCallback(
-                on_inicio=lambda: print("[BLE] Señal activa"),
-                on_falla=lambda code: print(f"[BLE] Error: {code}")
+                on_inicio=lambda: print("[BLE] Advertising activo"),
+                on_falla=lambda code: print(f"[BLE] Fallo codigo: {code}")
             )
             self.advertiser.startAdvertising(settings, data, self._ble_callback)
-            print("[BLE] Advertising iniciado")
+            print("[BLE] startAdvertising llamado")
 
         except Exception as e:
             print(f"[BLE] Error: {e}")
@@ -993,7 +991,6 @@ class CredencialAgriCactusApp(MDApp):
         if self._wifi_activo:
             return
         self._wifi_activo = True
-
         def _escuchar():
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -1020,7 +1017,6 @@ class CredencialAgriCactusApp(MDApp):
                 print(f"[WIFI] Error servidor: {e}")
             finally:
                 self._wifi_activo = False
-
         self._wifi_thread = threading.Thread(target=_escuchar, daemon=True)
         self._wifi_thread.start()
 
@@ -1030,20 +1026,16 @@ class CredencialAgriCactusApp(MDApp):
         historial = datos.get("historial", [])
         historial = agregar_dia_historial(historial, estatus="presente")
         faltas    = calcular_faltas_consecutivas(historial)
-
         datos["historial"]           = historial
         datos["faltas_consecutivas"] = faltas
         datos["ultima_asistencia"]   = ahora.isoformat()
         guardar_datos(datos)
-
         pa = self.root.get_screen('activa')
         pa.texto_estado_conexion = f"Asistencia validada: {ahora.strftime('%H:%M')}"
         pa.color_estado          = [0.18, 0.29, 0.12, 1]
         pa.texto_vigencia        = self._texto_vigencia(faltas)
-
         if self.root.current == 'inactiva' and faltas < MAX_FALTAS:
             self.root.current = 'activa'
-
         Snackbar(text="Asistencia registrada correctamente").open()
 
     def detener_wifi(self):
@@ -1071,23 +1063,18 @@ class CredencialAgriCactusApp(MDApp):
         historial = datos.get("historial", [])
         hoy       = datetime.date.today()
         ahora     = datetime.datetime.now()
-
-        gracia = en_periodo_gracia(datos)
-
+        gracia    = en_periodo_gracia(datos)
         if not gracia:
             hora_entrada = datos.get("hora_entrada", 7)
             hora_limite  = hora_entrada + TOLERANCIA_HORAS
             dias_ok      = {e.get("fecha") for e in historial}
-
             if es_dia_laboral(hoy) and hoy.isoformat() not in dias_ok:
                 if ahora.hour >= hora_limite:
                     historial = agregar_dia_historial(historial, estatus="falta")
                     datos["historial"] = historial
                     guardar_datos(datos)
-
         faltas = 0 if gracia else calcular_faltas_consecutivas(historial)
         pa     = self.root.get_screen('activa')
-
         if faltas >= MAX_FALTAS:
             self.apagar_ble()
             self.detener_wifi()
