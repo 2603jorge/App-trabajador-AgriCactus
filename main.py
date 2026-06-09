@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v2.3 - Camara sin FileProvider, fix faltas
+#  v2.4 - Fix BLUETOOTH_ADVERTISE Android 12+
 # =============================================================================
 
 import datetime
@@ -654,11 +654,8 @@ class PantallaRegistro(Screen):
             FileOutputStream     = autoclass('java.io.FileOutputStream')
             BitmapCompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
 
-            # Obtener thumbnail del bundle
-            extras = intent.getExtras()
-            bitmap = extras.get("data")
-
-            # Guardar en directorio interno de la app
+            extras    = intent.getExtras()
+            bitmap    = extras.get("data")
             files_dir = PythonActivity.mActivity.getFilesDir().getAbsolutePath()
             ruta      = f"{files_dir}/agricactus_foto.jpg"
 
@@ -930,6 +927,27 @@ class CredencialAgriCactusApp(MDApp):
         if not BLE_DISPONIBLE:
             return
         try:
+            # ✅ Verificar permisos BLE en Android 12+
+            if platform == 'android':
+                from android.permissions import request_permissions, Permission, check_permission
+                from jnius import autoclass as _ac
+                sdk = _ac('android.os.Build').VERSION.SDK_INT
+                if sdk >= 31:
+                    permisos = [
+                        Permission.BLUETOOTH_ADVERTISE,
+                        Permission.BLUETOOTH_CONNECT,
+                    ]
+                    if not all(check_permission(p) for p in permisos):
+                        def _on_permisos(ps, cs):
+                            if all(cs):
+                                Clock.schedule_once(
+                                    lambda dt: self.encender_ble(numero_credencial), 0.5
+                                )
+                            else:
+                                print("[BLE] Permisos denegados")
+                        request_permissions(permisos, _on_permisos)
+                        return
+
             adaptador = BluetoothAdapter.getDefaultAdapter()
             if not (adaptador and adaptador.isEnabled()):
                 return
@@ -959,6 +977,8 @@ class CredencialAgriCactusApp(MDApp):
                 on_falla=lambda code: print(f"[BLE] Error: {code}")
             )
             self.advertiser.startAdvertising(settings, data, self._ble_callback)
+            print("[BLE] Advertising iniciado")
+
         except Exception as e:
             print(f"[BLE] Error: {e}")
 
