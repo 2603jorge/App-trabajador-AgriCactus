@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v2.6 - Fix Build$VERSION
+#  v3.0 - WiFi UDP puro, sin BLE
 # =============================================================================
 
 import datetime
@@ -17,55 +17,23 @@ from kivy.utils import platform
 from kivymd.app import MDApp
 from kivymd.uix.snackbar import Snackbar
 
-# --- GPS (plyer) ---
 try:
     from plyer import gps, filechooser
     GPS_DISPONIBLE = True
 except Exception:
     GPS_DISPONIBLE = False
 
-# --- BLE nativo Android ---
-if platform == 'android':
-    try:
-        from jnius import autoclass, PythonJavaClass, java_method
-        BluetoothAdapter  = autoclass('android.bluetooth.BluetoothAdapter')
-        AdvertiseSettings = autoclass('android.bluetooth.le.AdvertiseSettings')
-        AdvertiseData     = autoclass('android.bluetooth.le.AdvertiseData')
-        ParcelUuid        = autoclass('android.os.ParcelUuid')
-        UUID              = autoclass('java.util.UUID')
-
-        class _AdvertiseCallback(PythonJavaClass):
-            __javainterfaces__ = ['android/bluetooth/le/AdvertiseCallback']
-            __javacontext__ = 'app'
-
-            def __init__(self, on_inicio, on_falla):
-                super().__init__()
-                self._on_inicio = on_inicio
-                self._on_falla  = on_falla
-
-            @java_method('(Landroid/bluetooth/le/AdvertiseSettings;)V')
-            def onStartSuccess(self, settings):
-                Clock.schedule_once(lambda dt: self._on_inicio(), 0)
-
-            @java_method('(I)V')
-            def onStartFailure(self, errorCode):
-                Clock.schedule_once(lambda dt: self._on_falla(errorCode), 0)
-
-        BLE_DISPONIBLE = True
-    except Exception:
-        BLE_DISPONIBLE = False
-else:
-    BLE_DISPONIBLE = False
-
 # =============================================================================
 #  CONSTANTES
 # =============================================================================
-ARCHIVO_DATOS    = "empleado_data.json"
-PUERTO_WIFI      = 45678
-MAX_FALTAS       = 3
-DIAS_LABORALES   = {0, 1, 2, 3, 4}
-TOLERANCIA_HORAS = 2
-DIAS_GRACIA      = 3
+ARCHIVO_DATOS     = "empleado_data.json"
+PUERTO_ANUNCIO    = 45678   # Trabajador -> Cuadrillero (anuncio de presencia)
+PUERTO_VALIDACION = 45679   # Cuadrillero -> Trabajador (confirmacion)
+INTERVALO_ANUNCIO = 10      # Segundos entre anuncios
+MAX_FALTAS        = 3
+DIAS_LABORALES    = {0, 1, 2, 3, 4}
+TOLERANCIA_HORAS  = 2
+DIAS_GRACIA       = 3
 
 # =============================================================================
 #  PERSISTENCIA
@@ -75,7 +43,7 @@ def guardar_datos(datos: dict):
         with open(ARCHIVO_DATOS, 'w', encoding='utf-8') as f:
             json.dump(datos, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[STORAGE] Error al guardar: {e}")
+        print(f"[STORAGE] Error: {e}")
 
 def cargar_datos() -> dict:
     if os.path.exists(ARCHIVO_DATOS):
@@ -87,7 +55,7 @@ def cargar_datos() -> dict:
     return {}
 
 # =============================================================================
-#  LOGICA DE FALTAS Y ASISTENCIA
+#  LOGICA DE FALTAS
 # =============================================================================
 def es_dia_laboral(fecha: datetime.date) -> bool:
     return fecha.weekday() in DIAS_LABORALES
@@ -246,7 +214,7 @@ ScreenManager:
         MDTextField:
             id: input_hora_entrada
             hint_text: "Hora de entrada (ej: 07:00)"
-            helper_text: "Formato 24h — las faltas se cuentan 2h despues"
+            helper_text: "Formato 24h"
             helper_text_mode: "on_focus"
             line_color_focus: 0.18, 0.29, 0.12, 1
             pos_hint: {'center_x': 0.5, 'center_y': 0.35}
@@ -417,10 +385,9 @@ ScreenManager:
                     size_hint: (0.88, 0.06)
 
                 MDIcon:
-                    id: icono_ble
-                    icon: "bluetooth-connect"
+                    icon: "wifi"
                     theme_text_color: "Custom"
-                    text_color: root.color_icono_ble
+                    text_color: root.color_icono_wifi
                     font_size: "32sp"
                     pos_hint: {'center_x': 0.14, 'center_y': 0.15}
 
@@ -429,16 +396,8 @@ ScreenManager:
                     font_style: "Caption"
                     halign: "center"
                     theme_text_color: "Secondary"
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.09}
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.06}
                     size_hint: (0.88, 0.05)
-
-                MDRaisedButton:
-                    text: "TEST BLE"
-                    md_bg_color: 0.96, 0.65, 0.14, 1
-                    text_color: 0.18, 0.29, 0.12, 1
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.05}
-                    size_hint: (0.5, 0.05)
-                    on_release: app.test_ble()
 
                 MDFloatLayout:
                     size_hint_y: 0.04
@@ -618,7 +577,6 @@ ScreenManager:
 # =============================================================================
 class PantallaRegistro(Screen):
     ruta_foto_seleccionada = ""
-    _ruta_foto_camara      = ""
 
     def tomar_foto(self):
         if platform == 'android':
@@ -747,8 +705,8 @@ class PantallaRegistro(Screen):
         guardar_datos(datos)
 
         app.ultima_asistencia = datetime.datetime.now()
-        app.encender_ble(credencial)
-        app.iniciar_servidor_wifi(credencial, cuadrilla)
+        app.iniciar_anuncio_wifi(credencial, cuadrilla, nombre_fmt)
+        app.iniciar_servidor_validacion(credencial, cuadrilla)
         app.iniciar_gps()
         app.root.current = 'activa'
         Snackbar(text="Credencial generada correctamente").open()
@@ -762,9 +720,9 @@ class PantallaActiva(Screen):
     num_cuadrilla         = StringProperty("")
     texto_vigencia        = StringProperty("Sin faltas consecutivas")
     ruta_foto             = StringProperty("")
-    color_icono_ble       = ListProperty([0.96, 0.65, 0.14, 1])
+    color_icono_wifi      = ListProperty([0.96, 0.65, 0.14, 1])
     texto_gps             = StringProperty("GPS: sin senal")
-    texto_estado_conexion = StringProperty("Esperando cuadrillero...")
+    texto_estado_conexion = StringProperty("Buscando cuadrillero...")
     color_estado          = ListProperty([0.6, 0.6, 0.6, 1])
 
 
@@ -821,8 +779,8 @@ class PantallaInactiva(Screen):
         faltas = calcular_faltas_consecutivas(historial)
         pa = app.root.get_screen('activa')
         pa.texto_vigencia = app._texto_vigencia(faltas)
-        app.encender_ble(pa.num_credencial)
-        app.iniciar_servidor_wifi(pa.num_credencial, pa.num_cuadrilla)
+        app.iniciar_anuncio_wifi(pa.num_credencial, pa.num_cuadrilla, pa.nombre_empleado)
+        app.iniciar_servidor_validacion(pa.num_credencial, pa.num_cuadrilla)
         app.root.current = 'activa'
         mensajes = {
             "falta":       "Faltas aceptadas. Credencial desbloqueada.",
@@ -836,18 +794,18 @@ class PantallaInactiva(Screen):
 #  APLICACION PRINCIPAL
 # =============================================================================
 class CredencialAgriCactusApp(MDApp):
-    estado_parpadeo = BooleanProperty(False)
-    _ble_callback   = None
-    _wifi_thread    = None
-    _wifi_activo    = False
+    estado_parpadeo  = BooleanProperty(False)
+    _anuncio_activo  = False
+    _validacion_activa = False
+    _wifi_thread     = None
+    _anuncio_thread  = None
 
     def build(self):
-        self.advertiser = None
         self.theme_cls.theme_style     = "Light"
         self.theme_cls.primary_palette = "Green"
         controlador = Builder.load_string(KV)
         Clock.schedule_interval(self.verificar_vigencia, 30)
-        Clock.schedule_interval(self.parpadear_ble, 1)
+        Clock.schedule_interval(self.parpadear_wifi, 1)
         Clock.schedule_once(self._restaurar_sesion, 0.5)
         return controlador
 
@@ -875,8 +833,11 @@ class CredencialAgriCactusApp(MDApp):
             pi.texto_faltas = f"Faltas del mes: {contar_faltas_mes(historial)}"
             self.root.current = 'inactiva'
         else:
-            self.encender_ble(pa.num_credencial)
-            self.iniciar_servidor_wifi(pa.num_credencial, pa.num_cuadrilla)
+            cred = datos.get("credencial", "")
+            cuad = datos.get("cuadrilla", "")
+            nomb = datos.get("nombre", "")
+            self.iniciar_anuncio_wifi(cred, cuad, nomb)
+            self.iniciar_servidor_validacion(cred, cuad)
             self.iniciar_gps()
             self.root.current = 'activa'
 
@@ -890,7 +851,7 @@ class CredencialAgriCactusApp(MDApp):
             )
             gps.start(minTime=60000, minDistance=100)
         except Exception as e:
-            print(f"[GPS] No se pudo iniciar: {e}")
+            print(f"[GPS] Error: {e}")
 
     def _on_gps_location(self, **kwargs):
         lat   = kwargs.get('lat', 0)
@@ -908,98 +869,56 @@ class CredencialAgriCactusApp(MDApp):
     def _on_gps_status(self, stype, status):
         print(f"[GPS] {stype}: {status}")
 
-    def test_ble(self):
-        pa            = self.root.get_screen('activa')
-        cred          = pa.num_credencial
-        cuad          = pa.num_cuadrilla
-        advertiser_ok = self.advertiser is not None
-        ble_ok        = BLE_DISPONIBLE
-        try:
-            uuid_tail = f"{int(cuad):03d}{int(cred):09d}" if cred and cuad else "sin_datos"
-        except Exception:
-            uuid_tail = "error"
-        msg = f"BLE:{ble_ok} ADV:{advertiser_ok} UUID:...{uuid_tail}"
-        Snackbar(text=msg).open()
-        print(f"[TEST TRABAJADOR] {msg}")
-
-    def encender_ble(self, numero_credencial):
-        if not BLE_DISPONIBLE:
+    # ── Anuncio WiFi UDP (trabajador -> cuadrillero) ──────────────────────────
+    def iniciar_anuncio_wifi(self, credencial, cuadrilla, nombre):
+        """
+        Emite broadcast UDP cada 10 segundos anunciando presencia.
+        Formato: PRESENTE:<credencial>:<cuadrilla>:<nombre>
+        """
+        if self._anuncio_activo:
             return
-        try:
-            if platform == 'android':
-                from android.permissions import request_permissions, Permission, check_permission
-                from jnius import autoclass as _ac
-                # ✅ Fix: usar Build$VERSION no Build.VERSION
-                BuildVersion = _ac('android.os.Build$VERSION')
-                sdk = BuildVersion.SDK_INT
-                if sdk >= 31:
-                    permisos = [
-                        Permission.BLUETOOTH_ADVERTISE,
-                        Permission.BLUETOOTH_CONNECT,
-                    ]
-                    if not all(check_permission(p) for p in permisos):
-                        def _on_permisos(ps, cs):
-                            if all(cs):
-                                Clock.schedule_once(
-                                    lambda dt: self.encender_ble(numero_credencial), 0.5
-                                )
-                            else:
-                                print("[BLE] Permisos ADVERTISE denegados")
-                        request_permissions(permisos, _on_permisos)
-                        return
+        self._anuncio_activo = True
 
-            adaptador = BluetoothAdapter.getDefaultAdapter()
-            if not (adaptador and adaptador.isEnabled()):
-                return
-            self.advertiser = adaptador.getBluetoothLeAdvertiser()
-            if not self.advertiser:
-                return
+        def _anunciar():
+            while self._anuncio_activo:
+                try:
+                    nombre_limpio = str(nombre).replace(':', ' ').replace('\n', ' ')
+                    mensaje = f"PRESENTE:{credencial}:{cuadrilla}:{nombre_limpio}"
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                        sock.sendto(
+                            mensaje.encode('utf-8'),
+                            ('255.255.255.255', PUERTO_ANUNCIO)
+                        )
+                    print(f"[WIFI] Anuncio enviado: {mensaje}")
+                except Exception as e:
+                    print(f"[WIFI] Error anuncio: {e}")
+                import time
+                time.sleep(INTERVALO_ANUNCIO)
 
-            sb = AdvertiseSettings.Builder()
-            sb.setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            sb.setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-            sb.setConnectable(False)
-            sb.setTimeout(0)
-            settings = sb.build()
+        self._anuncio_thread = threading.Thread(target=_anunciar, daemon=True)
+        self._anuncio_thread.start()
 
-            pa = self.root.get_screen('activa')
-            cuadrilla_num  = int(pa.num_cuadrilla) if str(pa.num_cuadrilla).isdigit() else 0
-            credencial_num = int(numero_credencial) if str(numero_credencial).isdigit() else 9999
-            uuid_str = f"0000ac10-0000-1000-8000-{cuadrilla_num:03d}{credencial_num:09d}"
+    def detener_anuncio(self):
+        self._anuncio_activo = False
 
-            db = AdvertiseData.Builder()
-            db.addServiceUuid(ParcelUuid(UUID.fromString(uuid_str)))
-            db.setIncludeDeviceName(False)
-            data = db.build()
-
-            self._ble_callback = _AdvertiseCallback(
-                on_inicio=lambda: print("[BLE] Advertising activo"),
-                on_falla=lambda code: print(f"[BLE] Fallo codigo: {code}")
-            )
-            self.advertiser.startAdvertising(settings, data, self._ble_callback)
-            print("[BLE] startAdvertising llamado")
-
-        except Exception as e:
-            print(f"[BLE] Error: {e}")
-
-    def apagar_ble(self):
-        if BLE_DISPONIBLE and self.advertiser and self._ble_callback:
-            try:
-                self.advertiser.stopAdvertising(self._ble_callback)
-            except Exception as e:
-                print(f"[BLE] Error al apagar: {e}")
-
-    def iniciar_servidor_wifi(self, credencial, cuadrilla):
-        if self._wifi_activo:
+    # ── Servidor validacion (cuadrillero -> trabajador) ───────────────────────
+    def iniciar_servidor_validacion(self, credencial, cuadrilla):
+        """
+        Escucha confirmaciones del cuadrillero.
+        Formato recibido: VALIDAR:<credencial>:<cuadrilla>:<fecha>
+        """
+        if self._validacion_activa:
             return
-        self._wifi_activo = True
+        self._validacion_activa = True
+
         def _escuchar():
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    sock.bind(('', PUERTO_WIFI))
+                    sock.bind(('', PUERTO_VALIDACION))
                     sock.settimeout(2.0)
-                    while self._wifi_activo:
+                    while self._validacion_activa:
                         try:
                             datos_raw, addr = sock.recvfrom(1024)
                             mensaje = datos_raw.decode('utf-8').strip()
@@ -1009,20 +928,21 @@ class CredencialAgriCactusApp(MDApp):
                                     partes[1] == str(credencial)):
                                 sock.sendto(f"OK:{credencial}".encode(), addr)
                                 Clock.schedule_once(
-                                    lambda dt: self._registrar_asistencia_wifi(), 0
+                                    lambda dt: self._registrar_asistencia(), 0
                                 )
                         except socket.timeout:
                             continue
                         except Exception as e:
-                            print(f"[WIFI] Error: {e}")
+                            print(f"[WIFI] Error validacion: {e}")
             except Exception as e:
-                print(f"[WIFI] Error servidor: {e}")
+                print(f"[WIFI] Error servidor validacion: {e}")
             finally:
-                self._wifi_activo = False
+                self._validacion_activa = False
+
         self._wifi_thread = threading.Thread(target=_escuchar, daemon=True)
         self._wifi_thread.start()
 
-    def _registrar_asistencia_wifi(self):
+    def _registrar_asistencia(self):
         ahora     = datetime.datetime.now()
         datos     = cargar_datos()
         historial = datos.get("historial", [])
@@ -1040,9 +960,6 @@ class CredencialAgriCactusApp(MDApp):
             self.root.current = 'activa'
         Snackbar(text="Asistencia registrada correctamente").open()
 
-    def detener_wifi(self):
-        self._wifi_activo = False
-
     def _texto_vigencia(self, faltas: int) -> str:
         if faltas == 0:
             return "Sin faltas consecutivas"
@@ -1051,11 +968,11 @@ class CredencialAgriCactusApp(MDApp):
             return "Atencion: 1 falta mas = bloqueo"
         return f"Faltas consecutivas: {faltas}/{MAX_FALTAS}"
 
-    def parpadear_ble(self, dt):
+    def parpadear_wifi(self, dt):
         if self.root and self.root.current == 'activa':
             pa = self.root.get_screen('activa')
             self.estado_parpadeo = not self.estado_parpadeo
-            pa.color_icono_ble = (
+            pa.color_icono_wifi = (
                 [0.96, 0.65, 0.14, 1] if self.estado_parpadeo
                 else [0.29, 0.40, 0.25, 0.4]
             )
@@ -1078,8 +995,7 @@ class CredencialAgriCactusApp(MDApp):
         faltas = 0 if gracia else calcular_faltas_consecutivas(historial)
         pa     = self.root.get_screen('activa')
         if faltas >= MAX_FALTAS:
-            self.apagar_ble()
-            self.detener_wifi()
+            self.detener_anuncio()
             if self.root.current != 'inactiva':
                 pi = self.root.get_screen('inactiva')
                 pi.motivo_bloqueo = (
@@ -1093,8 +1009,8 @@ class CredencialAgriCactusApp(MDApp):
                 pa.texto_vigencia = self._texto_vigencia(faltas)
 
     def on_stop(self):
-        self.apagar_ble()
-        self.detener_wifi()
+        self.detener_anuncio()
+        self._validacion_activa = False
 
 
 if __name__ == '__main__':
