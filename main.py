@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v2.5 - Test BLE diagnóstico
+#  v2.6 - Fix Build$VERSION
 # =============================================================================
 
 import datetime
@@ -909,11 +909,11 @@ class CredencialAgriCactusApp(MDApp):
         print(f"[GPS] {stype}: {status}")
 
     def test_ble(self):
-        pa           = self.root.get_screen('activa')
-        cred         = pa.num_credencial
-        cuad         = pa.num_cuadrilla
+        pa            = self.root.get_screen('activa')
+        cred          = pa.num_credencial
+        cuad          = pa.num_cuadrilla
         advertiser_ok = self.advertiser is not None
-        ble_ok       = BLE_DISPONIBLE
+        ble_ok        = BLE_DISPONIBLE
         try:
             uuid_tail = f"{int(cuad):03d}{int(cred):09d}" if cred and cuad else "sin_datos"
         except Exception:
@@ -929,7 +929,9 @@ class CredencialAgriCactusApp(MDApp):
             if platform == 'android':
                 from android.permissions import request_permissions, Permission, check_permission
                 from jnius import autoclass as _ac
-                sdk = _ac('android.os.Build').VERSION.SDK_INT
+                # ✅ Fix: usar Build$VERSION no Build.VERSION
+                BuildVersion = _ac('android.os.Build$VERSION')
+                sdk = BuildVersion.SDK_INT
                 if sdk >= 31:
                     permisos = [
                         Permission.BLUETOOTH_ADVERTISE,
