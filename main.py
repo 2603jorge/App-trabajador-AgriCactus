@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v3.0 - WiFi UDP puro, sin BLE
+#  v3.1 - Anuncio cada hora + GPS en mensaje
 # =============================================================================
 
 import datetime
@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import threading
+import time
 
 from kivy.lang import Builder
 from kivy.clock import Clock
@@ -27,9 +28,9 @@ except Exception:
 #  CONSTANTES
 # =============================================================================
 ARCHIVO_DATOS     = "empleado_data.json"
-PUERTO_ANUNCIO    = 45678   # Trabajador -> Cuadrillero (anuncio de presencia)
-PUERTO_VALIDACION = 45679   # Cuadrillero -> Trabajador (confirmacion)
-INTERVALO_ANUNCIO = 10      # Segundos entre anuncios
+PUERTO_ANUNCIO    = 45678
+PUERTO_VALIDACION = 45679
+INTERVALO_ANUNCIO = 3600   # 1 hora en segundos
 MAX_FALTAS        = 3
 DIAS_LABORALES    = {0, 1, 2, 3, 4}
 TOLERANCIA_HORAS  = 2
@@ -396,8 +397,17 @@ ScreenManager:
                     font_style: "Caption"
                     halign: "center"
                     theme_text_color: "Secondary"
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.06}
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.07}
                     size_hint: (0.88, 0.05)
+
+                MDLabel:
+                    text: root.texto_proximo_anuncio
+                    font_style: "Caption"
+                    halign: "center"
+                    theme_text_color: "Custom"
+                    text_color: 0.29, 0.40, 0.25, 1
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.03}
+                    size_hint: (0.88, 0.04)
 
                 MDFloatLayout:
                     size_hint_y: 0.04
@@ -713,17 +723,18 @@ class PantallaRegistro(Screen):
 
 
 class PantallaActiva(Screen):
-    nombre_empleado       = StringProperty("")
-    fecha_ingreso         = StringProperty("")
-    nss                   = StringProperty("")
-    num_credencial        = StringProperty("")
-    num_cuadrilla         = StringProperty("")
-    texto_vigencia        = StringProperty("Sin faltas consecutivas")
-    ruta_foto             = StringProperty("")
-    color_icono_wifi      = ListProperty([0.96, 0.65, 0.14, 1])
-    texto_gps             = StringProperty("GPS: sin senal")
-    texto_estado_conexion = StringProperty("Buscando cuadrillero...")
-    color_estado          = ListProperty([0.6, 0.6, 0.6, 1])
+    nombre_empleado        = StringProperty("")
+    fecha_ingreso          = StringProperty("")
+    nss                    = StringProperty("")
+    num_credencial         = StringProperty("")
+    num_cuadrilla          = StringProperty("")
+    texto_vigencia         = StringProperty("Sin faltas consecutivas")
+    ruta_foto              = StringProperty("")
+    color_icono_wifi       = ListProperty([0.96, 0.65, 0.14, 1])
+    texto_gps              = StringProperty("GPS: sin senal")
+    texto_estado_conexion  = StringProperty("Buscando cuadrillero...")
+    color_estado           = ListProperty([0.6, 0.6, 0.6, 1])
+    texto_proximo_anuncio  = StringProperty("Proximo anuncio: --:--")
 
 
 class PantallaInactiva(Screen):
@@ -794,11 +805,12 @@ class PantallaInactiva(Screen):
 #  APLICACION PRINCIPAL
 # =============================================================================
 class CredencialAgriCactusApp(MDApp):
-    estado_parpadeo  = BooleanProperty(False)
-    _anuncio_activo  = False
+    estado_parpadeo    = BooleanProperty(False)
+    _anuncio_activo    = False
     _validacion_activa = False
-    _wifi_thread     = None
-    _anuncio_thread  = None
+    _lat               = 0.0
+    _lon               = 0.0
+    _proximo_anuncio   = None
 
     def build(self):
         self.theme_cls.theme_style     = "Light"
@@ -806,6 +818,7 @@ class CredencialAgriCactusApp(MDApp):
         controlador = Builder.load_string(KV)
         Clock.schedule_interval(self.verificar_vigencia, 30)
         Clock.schedule_interval(self.parpadear_wifi, 1)
+        Clock.schedule_interval(self._actualizar_countdown, 60)
         Clock.schedule_once(self._restaurar_sesion, 0.5)
         return controlador
 
@@ -849,32 +862,35 @@ class CredencialAgriCactusApp(MDApp):
                 on_location=self._on_gps_location,
                 on_status=self._on_gps_status
             )
-            gps.start(minTime=60000, minDistance=100)
+            gps.start(minTime=60000, minDistance=50)
         except Exception as e:
             print(f"[GPS] Error: {e}")
 
     def _on_gps_location(self, **kwargs):
-        lat   = kwargs.get('lat', 0)
-        lon   = kwargs.get('lon', 0)
-        texto = f"GPS: {lat:.4f}, {lon:.4f}"
+        self._lat = kwargs.get('lat', 0.0)
+        self._lon = kwargs.get('lon', 0.0)
+        texto = f"GPS: {self._lat:.4f}, {self._lon:.4f}"
         def _actualizar(dt):
             pa = self.root.get_screen('activa')
             pa.texto_gps = texto
             datos = cargar_datos()
-            datos["lat"] = lat
-            datos["lon"] = lon
+            datos["lat"] = self._lat
+            datos["lon"] = self._lon
             guardar_datos(datos)
         Clock.schedule_once(_actualizar, 0)
 
     def _on_gps_status(self, stype, status):
         print(f"[GPS] {stype}: {status}")
 
-    # ── Anuncio WiFi UDP (trabajador -> cuadrillero) ──────────────────────────
+    def _actualizar_countdown(self, dt):
+        if self._proximo_anuncio:
+            minutos = max(0, int((self._proximo_anuncio - time.time()) / 60))
+            if self.root and self.root.current == 'activa':
+                pa = self.root.get_screen('activa')
+                pa.texto_proximo_anuncio = f"Proximo anuncio en: {minutos} min"
+
+    # ── Anuncio WiFi UDP cada 1 hora ─────────────────────────────────────────
     def iniciar_anuncio_wifi(self, credencial, cuadrilla, nombre):
-        """
-        Emite broadcast UDP cada 10 segundos anunciando presencia.
-        Formato: PRESENTE:<credencial>:<cuadrilla>:<nombre>
-        """
         if self._anuncio_activo:
             return
         self._anuncio_activo = True
@@ -883,7 +899,10 @@ class CredencialAgriCactusApp(MDApp):
             while self._anuncio_activo:
                 try:
                     nombre_limpio = str(nombre).replace(':', ' ').replace('\n', ' ')
-                    mensaje = f"PRESENTE:{credencial}:{cuadrilla}:{nombre_limpio}"
+                    lat = self._lat
+                    lon = self._lon
+                    # Formato: PRESENTE:<credencial>:<cuadrilla>:<nombre>:<lat>:<lon>
+                    mensaje = f"PRESENTE:{credencial}:{cuadrilla}:{nombre_limpio}:{lat:.6f}:{lon:.6f}"
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                         sock.sendto(
@@ -891,23 +910,31 @@ class CredencialAgriCactusApp(MDApp):
                             ('255.255.255.255', PUERTO_ANUNCIO)
                         )
                     print(f"[WIFI] Anuncio enviado: {mensaje}")
+                    self._proximo_anuncio = time.time() + INTERVALO_ANUNCIO
+                    Clock.schedule_once(lambda dt: self._actualizar_countdown(0), 0)
                 except Exception as e:
                     print(f"[WIFI] Error anuncio: {e}")
-                import time
                 time.sleep(INTERVALO_ANUNCIO)
 
-        self._anuncio_thread = threading.Thread(target=_anunciar, daemon=True)
-        self._anuncio_thread.start()
+        threading.Thread(target=_anunciar, daemon=True).start()
+        # Primer anuncio inmediato
+        def _primer_anuncio():
+            try:
+                nombre_limpio = str(nombre).replace(':', ' ').replace('\n', ' ')
+                mensaje = f"PRESENTE:{credencial}:{cuadrilla}:{nombre_limpio}:{self._lat:.6f}:{self._lon:.6f}"
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                    sock.sendto(mensaje.encode('utf-8'), ('255.255.255.255', PUERTO_ANUNCIO))
+                self._proximo_anuncio = time.time() + INTERVALO_ANUNCIO
+            except Exception as e:
+                print(f"[WIFI] Error primer anuncio: {e}")
+        threading.Thread(target=_primer_anuncio, daemon=True).start()
 
     def detener_anuncio(self):
         self._anuncio_activo = False
 
-    # ── Servidor validacion (cuadrillero -> trabajador) ───────────────────────
+    # ── Servidor validacion ───────────────────────────────────────────────────
     def iniciar_servidor_validacion(self, credencial, cuadrilla):
-        """
-        Escucha confirmaciones del cuadrillero.
-        Formato recibido: VALIDAR:<credencial>:<cuadrilla>:<fecha>
-        """
         if self._validacion_activa:
             return
         self._validacion_activa = True
@@ -935,12 +962,11 @@ class CredencialAgriCactusApp(MDApp):
                         except Exception as e:
                             print(f"[WIFI] Error validacion: {e}")
             except Exception as e:
-                print(f"[WIFI] Error servidor validacion: {e}")
+                print(f"[WIFI] Error servidor: {e}")
             finally:
                 self._validacion_activa = False
 
-        self._wifi_thread = threading.Thread(target=_escuchar, daemon=True)
-        self._wifi_thread.start()
+        threading.Thread(target=_escuchar, daemon=True).start()
 
     def _registrar_asistencia(self):
         ahora     = datetime.datetime.now()
@@ -973,8 +999,8 @@ class CredencialAgriCactusApp(MDApp):
             pa = self.root.get_screen('activa')
             self.estado_parpadeo = not self.estado_parpadeo
             pa.color_icono_wifi = (
-                [0.96, 0.65, 0.14, 1] if self.estado_parpadeo
-                else [0.29, 0.40, 0.25, 0.4]
+                [0.18, 0.29, 0.12, 1] if self.estado_parpadeo
+                else [0.96, 0.65, 0.14, 0.4]
             )
 
     def verificar_vigencia(self, dt):
