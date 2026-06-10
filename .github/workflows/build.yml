@@ -99,3 +99,4 @@ jobs:
           name: agricactus-trabajador-debug
           path: bin/*.apk
           if-no-files-found: warn
+
