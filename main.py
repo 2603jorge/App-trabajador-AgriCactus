@@ -1,6 +1,6 @@
 # =============================================================================
 #  AgriCactus - App del TRABAJADOR  (main.py)
-#  v3.1 - Anuncio cada hora + GPS en mensaje
+#  v3.2 - QR en credencial + estética mejorada
 # =============================================================================
 
 import datetime
@@ -24,13 +24,22 @@ try:
 except Exception:
     GPS_DISPONIBLE = False
 
+# QR generation
+try:
+    import qrcode
+    from kivy.core.image import Image as CoreImage
+    from io import BytesIO
+    QR_DISPONIBLE = True
+except Exception:
+    QR_DISPONIBLE = False
+
 # =============================================================================
 #  CONSTANTES
 # =============================================================================
 ARCHIVO_DATOS     = "empleado_data.json"
 PUERTO_ANUNCIO    = 45678
 PUERTO_VALIDACION = 45679
-INTERVALO_ANUNCIO = 3600   # 1 hora en segundos
+INTERVALO_ANUNCIO = 3600
 MAX_FALTAS        = 3
 DIAS_LABORALES    = {0, 1, 2, 3, 4}
 TOLERANCIA_HORAS  = 2
@@ -130,6 +139,28 @@ def en_periodo_gracia(datos: dict) -> bool:
         return dias < DIAS_GRACIA
     except Exception:
         return False
+
+def generar_qr_texture(texto: str):
+    if not QR_DISPONIBLE:
+        return None
+    try:
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=6,
+            border=2,
+        )
+        qr.add_data(texto)
+        qr.make(fit=True)
+        img    = qr.make_image(fill_color="black", back_color="white")
+        buf    = BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        core   = CoreImage(buf, ext='png')
+        return core.texture
+    except Exception as e:
+        print(f"[QR] Error: {e}")
+        return None
 
 # =============================================================================
 #  INTERFAZ KV
@@ -267,7 +298,7 @@ ScreenManager:
     name: 'activa'
 
     MDFloatLayout:
-        md_bg_color: 0.96, 0.96, 0.94, 1
+        md_bg_color: 0.94, 0.96, 0.94, 1
 
         MDFloatLayout:
             size_hint_x: 0.06
@@ -275,25 +306,26 @@ ScreenManager:
             md_bg_color: 0.18, 0.29, 0.12, 1
 
         MDCard:
-            size_hint: (0.92, 0.88)
+            size_hint: (0.92, 0.95)
             pos_hint: {'right': 0.99, 'center_y': 0.50}
-            elevation: 3
-            radius: [12, 12, 12, 12]
+            elevation: 4
+            radius: [16, 16, 16, 16]
             md_bg_color: 1, 1, 1, 1
 
             MDFloatLayout:
 
+                # ── Encabezado verde ──────────────────────────────────────
                 MDFloatLayout:
-                    size_hint_y: 0.18
+                    size_hint_y: 0.14
                     pos_hint: {'x': 0, 'top': 1}
                     md_bg_color: 0.18, 0.29, 0.12, 1
 
                     Image:
                         source: "logo_agricactus.png"
-                        size_hint: (0.48, 0.82)
+                        size_hint: (0.44, 0.82)
                         allow_stretch: True
                         keep_ratio: True
-                        pos_hint: {'center_x': 0.28, 'center_y': 0.5}
+                        pos_hint: {'center_x': 0.26, 'center_y': 0.5}
 
                     MDLabel:
                         text: "CREDENCIAL DIGITAL"
@@ -302,24 +334,32 @@ ScreenManager:
                         halign: "center"
                         theme_text_color: "Custom"
                         text_color: 0.96, 0.65, 0.14, 1
-                        pos_hint: {'center_x': 0.74, 'center_y': 0.62}
-                        size_hint: (0.5, 0.2)
+                        pos_hint: {'center_x': 0.72, 'center_y': 0.62}
+                        size_hint: (0.52, 0.22)
 
                     MDLabel:
                         text: root.texto_vigencia
                         font_style: "Caption"
                         halign: "center"
                         theme_text_color: "Custom"
-                        text_color: 0.8, 0.9, 0.8, 1
-                        pos_hint: {'center_x': 0.74, 'center_y': 0.34}
-                        size_hint: (0.5, 0.2)
+                        text_color: 0.78, 0.92, 0.78, 1
+                        pos_hint: {'center_x': 0.72, 'center_y': 0.30}
+                        size_hint: (0.52, 0.22)
 
+                # ── Franja naranja ────────────────────────────────────────
+                MDBoxLayout:
+                    size_hint: (1, 0.004)
+                    pos_hint: {'x': 0, 'top': 0.86}
+                    md_bg_color: 0.96, 0.65, 0.14, 1
+
+                # ── Foto ──────────────────────────────────────────────────
                 FitImage:
                     source: root.ruta_foto
-                    size_hint: (0.34, 0.35)
-                    pos_hint: {'x': 0.04, 'center_y': 0.56}
-                    radius: [8, 8, 8, 8]
+                    size_hint: (0.30, 0.28)
+                    pos_hint: {'x': 0.04, 'top': 0.84}
+                    radius: [10, 10, 10, 10]
 
+                # ── Datos del empleado ────────────────────────────────────
                 MDLabel:
                     text: root.nombre_empleado
                     markup: True
@@ -328,18 +368,18 @@ ScreenManager:
                     halign: "left"
                     valign: "center"
                     theme_text_color: "Custom"
-                    text_color: 0.18, 0.29, 0.12, 1
+                    text_color: 0.12, 0.22, 0.08, 1
                     text_size: self.size
-                    pos_hint: {'x': 0.42, 'center_y': 0.62}
-                    size_hint: (0.55, 0.18)
+                    pos_hint: {'x': 0.38, 'top': 0.84}
+                    size_hint: (0.58, 0.15)
 
                 MDLabel:
                     text: "Ingreso: " + root.fecha_ingreso
                     font_style: "Caption"
                     halign: "left"
                     theme_text_color: "Secondary"
-                    pos_hint: {'x': 0.42, 'center_y': 0.52}
-                    size_hint: (0.55, 0.06)
+                    pos_hint: {'x': 0.38, 'top': 0.69}
+                    size_hint: (0.58, 0.05)
 
                 MDLabel:
                     text: "Cuadrilla: " + root.num_cuadrilla
@@ -347,68 +387,96 @@ ScreenManager:
                     bold: True
                     halign: "left"
                     theme_text_color: "Custom"
-                    text_color: 0.29, 0.40, 0.25, 1
-                    pos_hint: {'x': 0.42, 'center_y': 0.46}
-                    size_hint: (0.55, 0.06)
-
-                MDBoxLayout:
-                    size_hint: (0.88, 0.005)
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.38}
-                    md_bg_color: 0.96, 0.65, 0.14, 1
+                    text_color: 0.18, 0.42, 0.18, 1
+                    pos_hint: {'x': 0.38, 'top': 0.64}
+                    size_hint: (0.58, 0.05)
 
                 MDLabel:
                     text: "NSS: " + root.nss
-                    font_style: "Body2"
-                    bold: True
+                    font_style: "Caption"
                     halign: "left"
                     theme_text_color: "Custom"
-                    text_color: 0.18, 0.29, 0.12, 1
-                    pos_hint: {'x': 0.06, 'center_y': 0.33}
-                    size_hint: (0.5, 0.06)
+                    text_color: 0.3, 0.3, 0.3, 1
+                    pos_hint: {'x': 0.38, 'top': 0.59}
+                    size_hint: (0.58, 0.05)
 
+                # ── Franja naranja divisor ────────────────────────────────
+                MDBoxLayout:
+                    size_hint: (0.90, 0.004)
+                    pos_hint: {'center_x': 0.5, 'top': 0.54}
+                    md_bg_color: 0.96, 0.65, 0.14, 1
+
+                # ── Numero de credencial ──────────────────────────────────
                 MDLabel:
                     text: "No. " + root.num_credencial
-                    font_style: "H5"
+                    font_style: "H4"
                     bold: True
                     halign: "center"
                     theme_text_color: "Custom"
-                    text_color: 0.18, 0.29, 0.12, 1
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.24}
-                    size_hint: (0.88, 0.08)
+                    text_color: 0.12, 0.22, 0.08, 1
+                    pos_hint: {'center_x': 0.5, 'top': 0.53}
+                    size_hint: (0.90, 0.10)
+
+                # ── Codigo QR ─────────────────────────────────────────────
+                Image:
+                    id: img_qr
+                    size_hint: (0.36, 0.20)
+                    pos_hint: {'center_x': 0.5, 'top': 0.42}
+                    allow_stretch: True
+                    keep_ratio: True
 
                 MDLabel:
-                    text: root.texto_estado_conexion
+                    text: "Acceso comedor"
                     font_style: "Caption"
                     halign: "center"
                     theme_text_color: "Custom"
-                    text_color: root.color_estado
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.15}
-                    size_hint: (0.88, 0.06)
+                    text_color: 0.5, 0.5, 0.5, 1
+                    pos_hint: {'center_x': 0.5, 'top': 0.22}
+                    size_hint: (0.90, 0.04)
 
-                MDIcon:
-                    icon: "wifi"
-                    theme_text_color: "Custom"
-                    text_color: root.color_icono_wifi
-                    font_size: "32sp"
-                    pos_hint: {'center_x': 0.14, 'center_y': 0.15}
+                # ── Estado WiFi ───────────────────────────────────────────
+                MDBoxLayout:
+                    orientation: 'horizontal'
+                    size_hint: (0.90, 0.06)
+                    pos_hint: {'center_x': 0.5, 'top': 0.18}
+                    spacing: '8dp'
+                    padding: ['8dp', 0, '8dp', 0]
 
+                    MDIcon:
+                        icon: "wifi"
+                        theme_text_color: "Custom"
+                        text_color: root.color_icono_wifi
+                        font_size: "20sp"
+                        size_hint_x: None
+                        width: '24dp'
+
+                    MDLabel:
+                        text: root.texto_estado_conexion
+                        font_style: "Caption"
+                        halign: "left"
+                        theme_text_color: "Custom"
+                        text_color: root.color_estado
+
+                # ── GPS ───────────────────────────────────────────────────
                 MDLabel:
                     text: root.texto_gps
                     font_style: "Caption"
                     halign: "center"
                     theme_text_color: "Secondary"
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.07}
-                    size_hint: (0.88, 0.05)
+                    pos_hint: {'center_x': 0.5, 'top': 0.12}
+                    size_hint: (0.90, 0.04)
 
+                # ── Proximo anuncio ───────────────────────────────────────
                 MDLabel:
                     text: root.texto_proximo_anuncio
                     font_style: "Caption"
                     halign: "center"
                     theme_text_color: "Custom"
-                    text_color: 0.29, 0.40, 0.25, 1
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.03}
-                    size_hint: (0.88, 0.04)
+                    text_color: 0.29, 0.50, 0.29, 1
+                    pos_hint: {'center_x': 0.5, 'top': 0.08}
+                    size_hint: (0.90, 0.04)
 
+                # ── Pie verde ─────────────────────────────────────────────
                 MDFloatLayout:
                     size_hint_y: 0.04
                     pos_hint: {'x': 0, 'y': 0}
@@ -425,26 +493,26 @@ ScreenManager:
     name: 'inactiva'
 
     MDFloatLayout:
-        md_bg_color: 0.12, 0.08, 0.08, 1
+        md_bg_color: 0.10, 0.06, 0.06, 1
 
         MDFloatLayout:
-            size_hint_y: 0.20
+            size_hint_y: 0.18
             pos_hint: {'x': 0, 'top': 1}
-            md_bg_color: 0.72, 0.10, 0.10, 1
+            md_bg_color: 0.65, 0.08, 0.08, 1
 
             Image:
                 source: "logo_agricactus.png"
-                size_hint: (0.30, 0.68)
+                size_hint: (0.28, 0.65)
                 allow_stretch: True
                 keep_ratio: True
                 pos_hint: {'center_x': 0.5, 'center_y': 0.5}
-                opacity: 0.4
+                opacity: 0.35
 
         MDIcon:
             icon: "lock-alert"
             theme_text_color: "Custom"
-            text_color: 0.72, 0.10, 0.10, 1
-            font_size: "56sp"
+            text_color: 0.80, 0.12, 0.12, 1
+            font_size: "60sp"
             pos_hint: {'center_x': 0.5, 'center_y': 0.74}
 
         MDLabel:
@@ -477,16 +545,16 @@ ScreenManager:
             size_hint: (0.88, 0.06)
 
         MDBoxLayout:
-            size_hint: (0.8, 0.003)
+            size_hint: (0.82, 0.003)
             pos_hint: {'center_x': 0.5, 'center_y': 0.43}
-            md_bg_color: 0.4, 0.25, 0.25, 1
+            md_bg_color: 0.35, 0.20, 0.20, 1
 
         MDCard:
-            size_hint: (0.88, 0.16)
+            size_hint: (0.88, 0.15)
             pos_hint: {'center_x': 0.5, 'center_y': 0.34}
             elevation: 2
-            radius: [8, 8, 8, 8]
-            md_bg_color: 0.20, 0.14, 0.14, 1
+            radius: [10, 10, 10, 10]
+            md_bg_color: 0.18, 0.12, 0.12, 1
 
             MDBoxLayout:
                 orientation: 'vertical'
@@ -497,7 +565,7 @@ ScreenManager:
                     icon: "office-building"
                     theme_text_color: "Custom"
                     text_color: 0.96, 0.65, 0.14, 1
-                    font_size: "24sp"
+                    font_size: "22sp"
                     halign: "center"
 
                 MDLabel:
@@ -513,19 +581,19 @@ ScreenManager:
                     font_style: "Caption"
                     halign: "center"
                     theme_text_color: "Custom"
-                    text_color: 0.75, 0.60, 0.60, 1
+                    text_color: 0.72, 0.55, 0.55, 1
 
         MDBoxLayout:
-            size_hint: (0.8, 0.003)
+            size_hint: (0.82, 0.003)
             pos_hint: {'center_x': 0.5, 'center_y': 0.23}
-            md_bg_color: 0.4, 0.25, 0.25, 1
+            md_bg_color: 0.35, 0.20, 0.20, 1
 
         MDLabel:
             text: "Desbloqueo autorizado por RH:"
             font_style: "Caption"
             halign: "center"
             theme_text_color: "Custom"
-            text_color: 0.65, 0.65, 0.65, 1
+            text_color: 0.60, 0.60, 0.60, 1
             pos_hint: {'center_x': 0.5, 'center_y': 0.19}
             size_hint: (0.88, 0.04)
 
@@ -545,7 +613,7 @@ ScreenManager:
             MDRaisedButton:
                 id: btn_tipo_incapacidad
                 text: "INCAPACIDAD"
-                md_bg_color: 0.29, 0.40, 0.25, 1
+                md_bg_color: 0.18, 0.38, 0.18, 1
                 size_hint_x: 0.33
                 on_release: root.seleccionar_tipo('incapacidad')
 
@@ -575,7 +643,7 @@ ScreenManager:
             MDRaisedButton:
                 text: "APLICAR"
                 md_bg_color: 0.96, 0.65, 0.14, 1
-                text_color: 0.18, 0.29, 0.12, 1
+                text_color: 0.12, 0.22, 0.08, 1
                 size_hint_x: 0.5
                 elevation: 4
                 on_release: root.intentar_reactivacion()
@@ -718,23 +786,24 @@ class PantallaRegistro(Screen):
         app.iniciar_anuncio_wifi(credencial, cuadrilla, nombre_fmt)
         app.iniciar_servidor_validacion(credencial, cuadrilla)
         app.iniciar_gps()
+        Clock.schedule_once(lambda dt: app.cargar_qr(credencial), 0.5)
         app.root.current = 'activa'
         Snackbar(text="Credencial generada correctamente").open()
 
 
 class PantallaActiva(Screen):
-    nombre_empleado        = StringProperty("")
-    fecha_ingreso          = StringProperty("")
-    nss                    = StringProperty("")
-    num_credencial         = StringProperty("")
-    num_cuadrilla          = StringProperty("")
-    texto_vigencia         = StringProperty("Sin faltas consecutivas")
-    ruta_foto              = StringProperty("")
-    color_icono_wifi       = ListProperty([0.96, 0.65, 0.14, 1])
-    texto_gps              = StringProperty("GPS: sin senal")
-    texto_estado_conexion  = StringProperty("Buscando cuadrillero...")
-    color_estado           = ListProperty([0.6, 0.6, 0.6, 1])
-    texto_proximo_anuncio  = StringProperty("Proximo anuncio: --:--")
+    nombre_empleado       = StringProperty("")
+    fecha_ingreso         = StringProperty("")
+    nss                   = StringProperty("")
+    num_credencial        = StringProperty("")
+    num_cuadrilla         = StringProperty("")
+    texto_vigencia        = StringProperty("Sin faltas consecutivas")
+    ruta_foto             = StringProperty("")
+    color_icono_wifi      = ListProperty([0.96, 0.65, 0.14, 1])
+    texto_gps             = StringProperty("GPS: sin senal")
+    texto_estado_conexion = StringProperty("Buscando cuadrillero...")
+    color_estado          = ListProperty([0.6, 0.6, 0.6, 1])
+    texto_proximo_anuncio = StringProperty("Proximo anuncio: --:--")
 
 
 class PantallaInactiva(Screen):
@@ -747,10 +816,10 @@ class PantallaInactiva(Screen):
         self._tipo_seleccionado = tipo
         colores = {
             "falta":       [0.50, 0.15, 0.15, 1],
-            "incapacidad": [0.29, 0.40, 0.25, 1],
+            "incapacidad": [0.18, 0.38, 0.18, 1],
             "vacaciones":  [0.18, 0.29, 0.45, 1],
         }
-        apagado = [0.25, 0.25, 0.25, 1]
+        apagado = [0.22, 0.22, 0.22, 1]
         self.ids.btn_tipo_falta.md_bg_color       = apagado
         self.ids.btn_tipo_incapacidad.md_bg_color = apagado
         self.ids.btn_tipo_vacaciones.md_bg_color  = apagado
@@ -792,6 +861,7 @@ class PantallaInactiva(Screen):
         pa.texto_vigencia = app._texto_vigencia(faltas)
         app.iniciar_anuncio_wifi(pa.num_credencial, pa.num_cuadrilla, pa.nombre_empleado)
         app.iniciar_servidor_validacion(pa.num_credencial, pa.num_cuadrilla)
+        Clock.schedule_once(lambda dt: app.cargar_qr(pa.num_credencial), 0.3)
         app.root.current = 'activa'
         mensajes = {
             "falta":       "Faltas aceptadas. Credencial desbloqueada.",
@@ -852,7 +922,18 @@ class CredencialAgriCactusApp(MDApp):
             self.iniciar_anuncio_wifi(cred, cuad, nomb)
             self.iniciar_servidor_validacion(cred, cuad)
             self.iniciar_gps()
+            Clock.schedule_once(lambda dt: self.cargar_qr(cred), 1.0)
             self.root.current = 'activa'
+
+    def cargar_qr(self, credencial: str):
+        if not credencial:
+            return
+        def _generar(dt):
+            texture = generar_qr_texture(credencial)
+            if texture:
+                pa = self.root.get_screen('activa')
+                pa.ids.img_qr.texture = texture
+        Clock.schedule_once(_generar, 0)
 
     def iniciar_gps(self):
         if not GPS_DISPONIBLE:
@@ -889,7 +970,6 @@ class CredencialAgriCactusApp(MDApp):
                 pa = self.root.get_screen('activa')
                 pa.texto_proximo_anuncio = f"Proximo anuncio en: {minutos} min"
 
-    # ── Anuncio WiFi UDP cada 1 hora ─────────────────────────────────────────
     def iniciar_anuncio_wifi(self, credencial, cuadrilla, nombre):
         if self._anuncio_activo:
             return
@@ -899,25 +979,17 @@ class CredencialAgriCactusApp(MDApp):
             while self._anuncio_activo:
                 try:
                     nombre_limpio = str(nombre).replace(':', ' ').replace('\n', ' ')
-                    lat = self._lat
-                    lon = self._lon
-                    # Formato: PRESENTE:<credencial>:<cuadrilla>:<nombre>:<lat>:<lon>
-                    mensaje = f"PRESENTE:{credencial}:{cuadrilla}:{nombre_limpio}:{lat:.6f}:{lon:.6f}"
+                    mensaje = f"PRESENTE:{credencial}:{cuadrilla}:{nombre_limpio}:{self._lat:.6f}:{self._lon:.6f}"
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                        sock.sendto(
-                            mensaje.encode('utf-8'),
-                            ('255.255.255.255', PUERTO_ANUNCIO)
-                        )
-                    print(f"[WIFI] Anuncio enviado: {mensaje}")
+                        sock.sendto(mensaje.encode('utf-8'), ('255.255.255.255', PUERTO_ANUNCIO))
                     self._proximo_anuncio = time.time() + INTERVALO_ANUNCIO
-                    Clock.schedule_once(lambda dt: self._actualizar_countdown(0), 0)
                 except Exception as e:
                     print(f"[WIFI] Error anuncio: {e}")
                 time.sleep(INTERVALO_ANUNCIO)
 
         threading.Thread(target=_anunciar, daemon=True).start()
-        # Primer anuncio inmediato
+
         def _primer_anuncio():
             try:
                 nombre_limpio = str(nombre).replace(':', ' ').replace('\n', ' ')
@@ -933,7 +1005,6 @@ class CredencialAgriCactusApp(MDApp):
     def detener_anuncio(self):
         self._anuncio_activo = False
 
-    # ── Servidor validacion ───────────────────────────────────────────────────
     def iniciar_servidor_validacion(self, credencial, cuadrilla):
         if self._validacion_activa:
             return
@@ -979,7 +1050,7 @@ class CredencialAgriCactusApp(MDApp):
         datos["ultima_asistencia"]   = ahora.isoformat()
         guardar_datos(datos)
         pa = self.root.get_screen('activa')
-        pa.texto_estado_conexion = f"Asistencia validada: {ahora.strftime('%H:%M')}"
+        pa.texto_estado_conexion = f"✓ Asistencia validada: {ahora.strftime('%H:%M')}"
         pa.color_estado          = [0.18, 0.29, 0.12, 1]
         pa.texto_vigencia        = self._texto_vigencia(faltas)
         if self.root.current == 'inactiva' and faltas < MAX_FALTAS:
@@ -991,7 +1062,7 @@ class CredencialAgriCactusApp(MDApp):
             return "Sin faltas consecutivas"
         restantes = MAX_FALTAS - faltas
         if restantes == 1:
-            return "Atencion: 1 falta mas = bloqueo"
+            return "⚠ 1 falta mas = bloqueo"
         return f"Faltas consecutivas: {faltas}/{MAX_FALTAS}"
 
     def parpadear_wifi(self, dt):
