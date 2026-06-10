@@ -5,7 +5,7 @@ package.domain = mx.agricactus
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,json
 version = 2.0
-requirements = python3,kivy,kivymd==1.1.1,plyer,pillow,android,pyjnius
+requirements = python3,kivy,kivymd==1.1.1,plyer,pillow,android,pyjnius,qrcode
 orientation = portrait
 icon.filename = %(source.dir)s/icono_uva.png
 presplash.filename = %(source.dir)s/logo_agricactus.png
