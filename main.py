@@ -4,8 +4,6 @@
 # =============================================================================
 
 import datetime
-import hashlib
-import hmac
 import json
 import os
 import socket
@@ -25,16 +23,10 @@ from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.textfield import MDTextField
 
 try:
-    from plyer import gps
+    from plyer import gps, filechooser
     GPS_DISPONIBLE = True
 except Exception:
     GPS_DISPONIBLE = False
-
-try:
-    from plyer import filechooser
-    FILECHOOSER_DISPONIBLE = True
-except Exception:
-    FILECHOOSER_DISPONIBLE = False
 
 try:
     import qrcode
@@ -81,10 +73,11 @@ ARCHIVO_DATOS      = "empleado_data.json"
 PUERTO_ANUNCIO     = 45678
 PUERTO_VALIDACION  = 45679
 PUERTO_APUNTADOR   = 45683   # Puerto especial para auto-validacion con apuntador
-INTERVALO_SIN_CONF = 3       # Cambio 3: reducido de 10s a 3s hasta primera confirmacion
+PUERTO_CONSULTA_EMP = 45690  # Puerto para consultar datos de empleado en el registro
+TIMEOUT_CONSULTA_EMP = 3.0   # segundos por intento
+REINTENTOS_CONSULTA_EMP = 3
+INTERVALO_SIN_CONF = 10
 INTERVALO_CON_CONF = 1800
-RAFAGA_ANUNCIO     = 3       # Cambio 3: paquetes por ciclo (ráfaga anti-pérdida UDP)
-PAUSA_RAFAGA       = 0.15    # Cambio 3: segundos entre paquetes de la ráfaga
 MAX_FALTAS         = 3
 DIAS_LABORALES     = {0, 1, 2, 3, 4}
 TOLERANCIA_HORAS   = 2
@@ -92,128 +85,24 @@ DIAS_GRACIA        = 3
 MAX_CONFIRMACIONES = 2
 PIN_RH             = "RH2024"
 
-# ── Ruta de respaldo persistente (sobrevive desinstalacion) ───────────────────
-# En Android usamos el almacenamiento externo compartido (no se borra con uninstall).
-# En escritorio/pruebas se usa el home del usuario.
-def _ruta_backup() -> str:
-    if platform == 'android':
-        try:
-            from jnius import autoclass
-            Environment = autoclass('android.os.Environment')
-            ruta_ext    = Environment.getExternalStorageDirectory().getAbsolutePath()
-            carpeta     = os.path.join(ruta_ext, "AgriCactus")
-            os.makedirs(carpeta, exist_ok=True)
-            return os.path.join(carpeta, "credencial_backup.dat")
-        except Exception:
-            pass
-    # Fallback para desarrollo en PC
-    carpeta = os.path.join(os.path.expanduser("~"), ".agricactus")
-    os.makedirs(carpeta, exist_ok=True)
-    return os.path.join(carpeta, "credencial_backup.dat")
-
-ARCHIVO_BACKUP = _ruta_backup()
-
-def guardar_backup(datos: dict):
-    """Guarda una copia de la credencial en almacenamiento externo persistente."""
-    try:
-        contenido = json.dumps(datos, ensure_ascii=False, indent=2).encode('utf-8')
-        if STORAGE_CIFRADO:
-            contenido = _fernet.encrypt(contenido)
-        with open(ARCHIVO_BACKUP, 'wb') as f:
-            f.write(contenido)
-    except Exception as e:
-        print(f"[BACKUP] Error al guardar backup: {e}")
-
-def cargar_backup() -> dict:
-    """Intenta recuperar la credencial desde el backup externo."""
-    if not os.path.exists(ARCHIVO_BACKUP):
-        return {}
-    try:
-        with open(ARCHIVO_BACKUP, 'rb') as f:
-            contenido = f.read()
-        if STORAGE_CIFRADO:
-            try:
-                contenido = _fernet.decrypt(contenido)
-            except Exception:
-                pass
-        return json.loads(contenido.decode('utf-8'))
-    except Exception as e:
-        print(f"[BACKUP] Error al leer backup: {e}")
-        return {}
-
-# ── Autenticación de mensajes UDP (punto 2) ───────────────────────────────────
-# Clave compartida con las demás apps del ecosistema AgriCactus.
-# Cambiar por una clave más robusta en producción.
-UDP_SECRET = b"AgriCactus2024SecretKey"
-
-def _firmar_mensaje(mensaje: str) -> str:
-    """Agrega un token HMAC-SHA256 al mensaje: '<mensaje>|<token_hex>'."""
-    token = hmac.new(UDP_SECRET, mensaje.encode('utf-8'), hashlib.sha256).hexdigest()[:16]
-    return f"{mensaje}|{token}"
-
-def _verificar_mensaje(datos_raw: bytes) -> str | None:
-    """Valida el token HMAC. Devuelve el mensaje sin token, o None si es inválido."""
-    try:
-        texto  = datos_raw.decode('utf-8').strip()
-        partes = texto.rsplit('|', 1)
-        if len(partes) != 2:
-            return None
-        mensaje, token_recibido = partes
-        token_esperado = hmac.new(UDP_SECRET, mensaje.encode('utf-8'), hashlib.sha256).hexdigest()[:16]
-        if not hmac.compare_digest(token_recibido, token_esperado):
-            return None
-        return mensaje
-    except Exception:
-        return None
-
-
-
-
-# ── Cifrado del almacenamiento local (punto 3) ────────────────────────────────
-try:
-    from cryptography.fernet import Fernet
-    import base64
-    _FERNET_SEED = b"AgriCactusStorageKey2024!!"
-    _FERNET_KEY  = base64.urlsafe_b64encode(
-        hashlib.sha256(_FERNET_SEED).digest()
-    )
-    _fernet = Fernet(_FERNET_KEY)
-    STORAGE_CIFRADO = True
-except Exception:
-    _fernet = None
-    STORAGE_CIFRADO = False
-
+# =============================================================================
+#  PERSISTENCIA
+# =============================================================================
 def guardar_datos(datos: dict):
     try:
-        contenido = json.dumps(datos, ensure_ascii=False, indent=2).encode('utf-8')
-        if STORAGE_CIFRADO:
-            contenido = _fernet.encrypt(contenido)
-            with open(ARCHIVO_DATOS, 'wb') as f:
-                f.write(contenido)
-        else:
-            with open(ARCHIVO_DATOS, 'w', encoding='utf-8') as f:
-                f.write(contenido.decode('utf-8'))
-        # Cambio 2: mantener backup externo sincronizado
-        guardar_backup(datos)
+        with open(ARCHIVO_DATOS, 'w', encoding='utf-8') as f:
+            json.dump(datos, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[STORAGE] Error: {e}")
 
 def cargar_datos() -> dict:
     if os.path.exists(ARCHIVO_DATOS):
         try:
-            with open(ARCHIVO_DATOS, 'rb') as f:
-                contenido = f.read()
-            if STORAGE_CIFRADO:
-                try:
-                    contenido = _fernet.decrypt(contenido)
-                except Exception:
-                    # Fallback: el archivo puede ser JSON plano de una versión anterior
-                    pass
-            return json.loads(contenido.decode('utf-8'))
+            with open(ARCHIVO_DATOS, 'r', encoding='utf-8') as f:
+                return json.load(f)
         except Exception:
             pass
     return {}
-
 
 # =============================================================================
 #  LOGICA DE FALTAS
@@ -232,9 +121,6 @@ def calcular_faltas_consecutivas(historial: list) -> int:
             fecha_inicio_conteo = datetime.date.fromisoformat(fic_str)
         except Exception:
             pass
-    # Punto 6: el conteo nunca cruza hacia el mes anterior
-    hoy             = datetime.date.today()
-    primer_dia_mes  = hoy.replace(day=1)
     dias_ok = set()
     for entrada in historial:
         f_str   = entrada.get("fecha", "")
@@ -247,10 +133,8 @@ def calcular_faltas_consecutivas(historial: list) -> int:
     if not dias_ok:
         return 0
     faltas = 0
-    fecha  = hoy - datetime.timedelta(days=1)
+    fecha  = datetime.date.today() - datetime.timedelta(days=1)
     for _ in range(60):
-        if fecha < primer_dia_mes:
-            break
         if fecha_inicio_conteo and fecha < fecha_inicio_conteo:
             break
         if not es_dia_laboral(fecha):
@@ -381,15 +265,41 @@ ScreenManager:
             max_text_length: 11
             input_filter: "int"
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.65}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.68}
             size_hint_x: 0.88
 
-        MDTextField:
-            id: input_credencial
-            hint_text: "Numero de Credencial / Empleado"
-            input_filter: "int"
-            line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.55}
+        MDBoxLayout:
+            orientation: 'horizontal'
+            size_hint: (0.88, 0.07)
+            pos_hint: {'center_x': 0.5, 'center_y': 0.575}
+            spacing: '6dp'
+
+            MDTextField:
+                id: input_credencial
+                hint_text: "Numero de Credencial / Empleado"
+                input_filter: "int"
+                line_color_focus: 0.18, 0.29, 0.12, 1
+                size_hint_x: 0.68
+                on_text_validate: root.buscar_datos_empleado()
+
+            MDRectangleFlatIconButton:
+                icon: "magnify"
+                text: "BUSCAR"
+                theme_text_color: "Custom"
+                text_color: 0.18, 0.29, 0.12, 1
+                line_color: 0.18, 0.29, 0.12, 1
+                size_hint_x: 0.32
+                pos_hint: {'center_y': 0.4}
+                on_release: root.buscar_datos_empleado()
+
+        MDLabel:
+            id: label_busqueda
+            text: ""
+            font_style: "Caption"
+            halign: "center"
+            theme_text_color: "Custom"
+            text_color: 0.5, 0.5, 0.5, 1
+            pos_hint: {'center_x': 0.5, 'center_y': 0.525}
             size_hint_x: 0.88
 
         MDTextField:
@@ -397,7 +307,7 @@ ScreenManager:
             hint_text: "Numero de Cuadrilla"
             input_filter: "int"
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.45}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.44}
             size_hint_x: 0.88
 
         MDTextField:
@@ -406,7 +316,7 @@ ScreenManager:
             helper_text: "Formato 24h"
             helper_text_mode: "on_focus"
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.35}
+            pos_hint: {'center_x': 0.5, 'center_y': 0.34}
             size_hint_x: 0.88
 
         MDBoxLayout:
@@ -642,15 +552,6 @@ ScreenManager:
                         size_hint_x: None
                         width: '22dp'
 
-                    # Indicador rojo/verde de validacion
-                    MDIcon:
-                        icon: "circle"
-                        theme_text_color: "Custom"
-                        text_color: root.color_indicador_validacion
-                        font_size: "14sp"
-                        size_hint_x: None
-                        width: '18dp'
-
                     MDLabel:
                         text: root.texto_estado_conexion
                         font_style: "Caption"
@@ -777,19 +678,43 @@ ScreenManager:
                     size_hint_x: 0.4
                     on_release: root.verificar_pin()
 
+        MDRectangleFlatIconButton:
+            id: btn_actualizar_red
+            icon: "wifi-sync"
+            text: "ACTUALIZAR PUESTO DESDE RED (RH)"
+            theme_text_color: "Custom"
+            text_color: 0.18, 0.29, 0.12, 1
+            line_color: 0.18, 0.29, 0.12, 1
+            pos_hint: {'center_x': 0.5, 'top': 0.605}
+            size_hint: (0.92, None)
+            height: '40dp'
+            disabled: True
+            on_release: root.actualizar_puesto_desde_red()
+
+        MDLabel:
+            id: label_estado_red_puesto
+            text: ""
+            font_style: "Caption"
+            halign: "center"
+            theme_text_color: "Custom"
+            text_color: 0.5, 0.5, 0.5, 1
+            pos_hint: {'center_x': 0.5, 'top': 0.555}
+            size_hint: (0.92, None)
+            height: '18dp'
+
         MDTextField:
             id: input_buscar_puesto
             hint_text: "Buscar puesto por nombre o clave..."
             line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'top': 0.47}
+            pos_hint: {'center_x': 0.5, 'top': 0.51}
             size_hint: (0.92, None)
             height: '48dp'
             disabled: True
             on_text: root.filtrar_puestos(self.text)
 
         ScrollView:
-            size_hint: (0.92, 0.32)
-            pos_hint: {'center_x': 0.5, 'top': 0.38}
+            size_hint: (0.92, 0.30)
+            pos_hint: {'center_x': 0.5, 'top': 0.43}
             id: scroll_puestos
 
             MDList:
@@ -981,7 +906,9 @@ ScreenManager:
 #  CLASES DE PANTALLA
 # =============================================================================
 class PantallaRegistro(Screen):
-    ruta_foto_seleccionada = ""
+    ruta_foto_seleccionada    = ""
+    _puesto_clave_encontrado  = ""
+    _puesto_desc_encontrado   = ""
 
     def tomar_foto(self):
         if platform == 'android':
@@ -1027,7 +954,7 @@ class PantallaRegistro(Screen):
             self.ids.label_foto.text = f"Error: {e}"
 
     def abrir_galeria(self):
-        if FILECHOOSER_DISPONIBLE:
+        if GPS_DISPONIBLE:
             try:
                 from plyer import filechooser as fc
                 fc.open_file(
@@ -1043,15 +970,40 @@ class PantallaRegistro(Screen):
             self.ruta_foto_seleccionada = seleccion[0]
             self.ids.label_foto.text    = f"OK: {os.path.basename(seleccion[0])}"
 
-    def guardar_registro(self):
-        # Cambio 2: bloquear si ya existe una credencial registrada
-        datos_existentes = cargar_datos()
-        if not datos_existentes:
-            datos_existentes = cargar_backup()
-        if datos_existentes.get("credencial"):
-            Snackbar(text="Ya existe una credencial registrada en este dispositivo.").open()
+    def buscar_datos_empleado(self):
+        credencial = self.ids.input_credencial.text.strip()
+        if not credencial:
+            Snackbar(text="Escribe primero el numero de credencial").open()
             return
 
+        self.ids.label_busqueda.text       = "Buscando en la red..."
+        self.ids.label_busqueda.text_color = (0.5, 0.5, 0.5, 1)
+
+        app = MDApp.get_running_app()
+        app.buscar_empleado_red(
+            credencial,
+            callback_ok=self._al_encontrar_empleado,
+            callback_error=self._al_fallar_busqueda,
+        )
+
+    def _al_encontrar_empleado(self, datos: dict):
+        self.ids.input_nombre.text    = datos.get("nombre", "")
+        self.ids.input_nss.text       = datos.get("nss", "")
+        self.ids.input_cuadrilla.text = datos.get("cuadrilla", "")
+
+        self._puesto_clave_encontrado = datos.get("puesto_clave", "")
+        self._puesto_desc_encontrado  = datos.get("puesto_desc", "")
+
+        self.ids.label_busqueda.text       = f"✓ Encontrado: {datos.get('nombre', '')}"
+        self.ids.label_busqueda.text_color = (0.18, 0.42, 0.18, 1)
+        Snackbar(text="Datos del empleado cargados").open()
+
+    def _al_fallar_busqueda(self, mensaje: str):
+        self.ids.label_busqueda.text       = mensaje
+        self.ids.label_busqueda.text_color = (0.7, 0.2, 0.15, 1)
+        Snackbar(text=mensaje).open()
+
+    def guardar_registro(self):
         nombre       = self.ids.input_nombre.text.strip().upper()
         nss          = self.ids.input_nss.text.strip()
         credencial   = self.ids.input_credencial.text.strip()
@@ -1107,6 +1059,18 @@ class PantallaRegistro(Screen):
             "ultima_asistencia":   datetime.datetime.now().isoformat(),
             "confirmaciones_hoy":  0,
         })
+
+        # Si la busqueda por red trajo un puesto para esta credencial,
+        # se configura como puesto fijo automaticamente (sin pasar por
+        # la pantalla de PIN de RH).
+        if self._puesto_clave_encontrado or self._puesto_desc_encontrado:
+            clave = self._puesto_clave_encontrado
+            desc  = self._puesto_desc_encontrado
+            desc_completa = f"{clave} - {desc}" if clave and desc else (desc or clave)
+            datos["puesto_fijo_clave"] = clave
+            datos["puesto_fijo_desc"]  = desc_completa
+            datos["es_puesto_fijo"]    = True
+
         guardar_datos(datos)
 
         app._confirmaciones_hoy = 0
@@ -1120,24 +1084,22 @@ class PantallaRegistro(Screen):
 
 
 class PantallaActiva(Screen):
-    nombre_empleado           = StringProperty("")
-    fecha_ingreso             = StringProperty("")
-    nss                       = StringProperty("")
-    num_credencial            = StringProperty("")
-    num_cuadrilla             = StringProperty("")
-    texto_vigencia            = StringProperty("Sin faltas consecutivas")
-    ruta_foto                 = StringProperty("")
-    color_icono_wifi          = ListProperty([0.96, 0.65, 0.14, 1])
-    texto_gps                 = StringProperty("GPS: sin senal")
-    texto_estado_conexion     = StringProperty("Buscando cuadrillero...")
-    color_estado              = ListProperty([0.6, 0.6, 0.6, 1])
-    texto_proximo_anuncio     = StringProperty("Emitiendo cada 3s...")
-    texto_turno               = StringProperty("Sin confirmar — emitiendo cada 3s")
-    color_turno               = ListProperty([0.96, 0.65, 0.14, 1])
-    texto_puesto_fijo         = StringProperty("Sin puesto fijo configurado")
-    color_badge_puesto        = ListProperty([0.7, 0.7, 0.7, 1])
-    # Indicador de validación: rojo = sin validar, verde = validado hoy
-    color_indicador_validacion = ListProperty([0.80, 0.10, 0.10, 1])
+    nombre_empleado       = StringProperty("")
+    fecha_ingreso         = StringProperty("")
+    nss                   = StringProperty("")
+    num_credencial        = StringProperty("")
+    num_cuadrilla         = StringProperty("")
+    texto_vigencia        = StringProperty("Sin faltas consecutivas")
+    ruta_foto             = StringProperty("")
+    color_icono_wifi      = ListProperty([0.96, 0.65, 0.14, 1])
+    texto_gps             = StringProperty("GPS: sin senal")
+    texto_estado_conexion = StringProperty("Buscando cuadrillero...")
+    color_estado          = ListProperty([0.6, 0.6, 0.6, 1])
+    texto_proximo_anuncio = StringProperty("Emitiendo cada 10s...")
+    texto_turno           = StringProperty("Sin confirmar — emitiendo cada 10s")
+    color_turno           = ListProperty([0.96, 0.65, 0.14, 1])
+    texto_puesto_fijo     = StringProperty("Sin puesto fijo configurado")
+    color_badge_puesto    = ListProperty([0.7, 0.7, 0.7, 1])
 
 
 class PantallaPuestoFijo(Screen):
@@ -1148,6 +1110,8 @@ class PantallaPuestoFijo(Screen):
         self._pin_verificado = False
         self.ids.input_pin_puesto.text = ""
         self.ids.input_buscar_puesto.disabled = True
+        self.ids.btn_actualizar_red.disabled  = True
+        self.ids.label_estado_red_puesto.text = ""
         self.ids.lista_puestos.clear_widgets()
 
         datos = cargar_datos()
@@ -1162,8 +1126,60 @@ class PantallaPuestoFijo(Screen):
             return
         self._pin_verificado = True
         self.ids.input_buscar_puesto.disabled = False
+        self.ids.btn_actualizar_red.disabled  = False
         self.filtrar_puestos("")
         Snackbar(text="PIN correcto — selecciona el puesto").open()
+
+    def actualizar_puesto_desde_red(self):
+        if not self._pin_verificado:
+            Snackbar(text="Verifica el PIN primero").open()
+            return
+        datos      = cargar_datos()
+        credencial = datos.get("credencial", "")
+        if not credencial:
+            Snackbar(text="No hay credencial registrada").open()
+            return
+
+        self.ids.label_estado_red_puesto.text       = "Buscando en la red..."
+        self.ids.label_estado_red_puesto.text_color = (0.5, 0.5, 0.5, 1)
+
+        app = MDApp.get_running_app()
+        app.buscar_empleado_red(
+            credencial,
+            callback_ok=self._al_actualizar_puesto_ok,
+            callback_error=self._al_actualizar_puesto_error,
+        )
+
+    def _al_actualizar_puesto_ok(self, datos_emp: dict):
+        clave = datos_emp.get("puesto_clave", "")
+        desc  = datos_emp.get("puesto_desc", "")
+
+        if not clave and not desc:
+            self.ids.label_estado_red_puesto.text       = "RH no tiene puesto fijo para esta credencial"
+            self.ids.label_estado_red_puesto.text_color = (0.7, 0.2, 0.15, 1)
+            Snackbar(text="Sin puesto fijo en RH para esta credencial").open()
+            return
+
+        desc_completa = f"{clave} - {desc}" if clave and desc else (desc or clave)
+
+        datos = cargar_datos()
+        datos["puesto_fijo_clave"] = clave
+        datos["puesto_fijo_desc"]  = desc_completa
+        datos["es_puesto_fijo"]    = True
+        guardar_datos(datos)
+
+        self.puesto_actual = desc_completa
+        self.ids.label_estado_red_puesto.text       = "✓ Puesto actualizado desde RH"
+        self.ids.label_estado_red_puesto.text_color = (0.18, 0.42, 0.18, 1)
+
+        app = MDApp.get_running_app()
+        app.actualizar_badge_puesto()
+        Snackbar(text=f"Puesto actualizado: {desc_completa}").open()
+
+    def _al_actualizar_puesto_error(self, mensaje: str):
+        self.ids.label_estado_red_puesto.text       = mensaje
+        self.ids.label_estado_red_puesto.text_color = (0.7, 0.2, 0.15, 1)
+        Snackbar(text=mensaje).open()
 
     def filtrar_puestos(self, texto):
         if not self._pin_verificado:
@@ -1299,15 +1315,6 @@ class CredencialAgriCactusApp(MDApp):
 
     def _restaurar_sesion(self, dt):
         datos = cargar_datos()
-
-        # Cambio 2: si no hay datos locales (reinstalacion), intentar recuperar backup
-        if not datos:
-            datos = cargar_backup()
-            if datos:
-                # Reconstruir datos locales desde el backup
-                guardar_datos(datos)
-                Snackbar(text="Credencial restaurada desde respaldo.").open()
-
         if not datos:
             return
         pa = self.root.get_screen('activa')
@@ -1335,12 +1342,6 @@ class CredencialAgriCactusApp(MDApp):
         pa.texto_vigencia = self._texto_vigencia(faltas)
         self._actualizar_texto_turno(pa)
         self.actualizar_badge_puesto()
-
-        # Restaurar indicador rojo/verde según si ya fue validado hoy
-        if self._confirmaciones_hoy > 0:
-            pa.color_indicador_validacion = [0.10, 0.72, 0.10, 1]
-        else:
-            pa.color_indicador_validacion = [0.80, 0.10, 0.10, 1]
 
         if faltas >= MAX_FALTAS:
             pi = self.root.get_screen('inactiva')
@@ -1374,7 +1375,7 @@ class CredencialAgriCactusApp(MDApp):
         if pa is None:
             pa = self.root.get_screen('activa')
         if self._confirmaciones_hoy == 0:
-            pa.texto_turno = "Sin confirmar — emitiendo cada 3s"
+            pa.texto_turno = "Sin confirmar — emitiendo cada 10s"
             pa.color_turno = [0.96, 0.65, 0.14, 1]
         elif self._confirmaciones_hoy == 1:
             pa.texto_turno = "✓ Turno MATUTINO confirmado"
@@ -1388,7 +1389,7 @@ class CredencialAgriCactusApp(MDApp):
             return
         pa = self.root.get_screen('activa')
         if self._confirmaciones_hoy == 0:
-            pa.texto_proximo_anuncio = "Emitiendo cada 3s"
+            pa.texto_proximo_anuncio = "Emitiendo cada 10s"
         elif self._proximo_anuncio:
             mins = max(0, int((self._proximo_anuncio - time.time()) / 60))
             pa.texto_proximo_anuncio = f"Proximo anuncio en: {mins} min"
@@ -1436,20 +1437,7 @@ class CredencialAgriCactusApp(MDApp):
         self._anuncio_activo = True
 
         def _anunciar():
-            # Cambio 3: socket persistente — evita overhead de crear/cerrar en cada ciclo
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                # TTL=255 para que el broadcast alcance toda la subred
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 255)
-                sock.setblocking(False)
-            except Exception as e:
-                print(f"[WIFI] Error creando socket: {e}")
-                self._anuncio_activo = False
-                return
-
-            self._enviar_anuncio(credencial, cuadrilla, nombre, sock)
+            self._enviar_anuncio(credencial, cuadrilla, nombre)
             while self._anuncio_activo:
                 intervalo = (
                     INTERVALO_SIN_CONF
@@ -1459,16 +1447,11 @@ class CredencialAgriCactusApp(MDApp):
                 self._proximo_anuncio = time.time() + intervalo
                 time.sleep(intervalo)
                 if self._anuncio_activo:
-                    self._enviar_anuncio(credencial, cuadrilla, nombre, sock)
-
-            try:
-                sock.close()
-            except Exception:
-                pass
+                    self._enviar_anuncio(credencial, cuadrilla, nombre)
 
         threading.Thread(target=_anunciar, daemon=True).start()
 
-    def _enviar_anuncio(self, credencial, cuadrilla, nombre, sock=None):
+    def _enviar_anuncio(self, credencial, cuadrilla, nombre):
         try:
             datos         = cargar_datos()
             es_fijo       = datos.get("es_puesto_fijo", False)
@@ -1483,35 +1466,72 @@ class CredencialAgriCactusApp(MDApp):
                 f":{self._confirmaciones_hoy}"
                 f":{tipo_trabajador}:{puesto_clave}:{puesto_desc[:20]}"
             )
-            payload = _firmar_mensaje(mensaje).encode('utf-8')
-            destino = ('255.255.255.255', PUERTO_ANUNCIO)
-
-            # Cambio 3: enviar en ráfaga para compensar pérdida de paquetes UDP
-            _sock_propio = sock is None
-            if _sock_propio:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 255)
-
-            for i in range(RAFAGA_ANUNCIO):
-                try:
-                    sock.sendto(payload, destino)
-                except Exception:
-                    # Si el socket no-bloqueante está ocupado, reintentamos de inmediato
-                    try:
-                        sock.sendto(payload, destino)
-                    except Exception:
-                        pass
-                if i < RAFAGA_ANUNCIO - 1:
-                    time.sleep(PAUSA_RAFAGA)
-
-            if _sock_propio:
-                sock.close()
+                sock.sendto(mensaje.encode('utf-8'), ('255.255.255.255', PUERTO_ANUNCIO))
         except Exception as e:
             print(f"[WIFI] Error anuncio: {e}")
 
     def detener_anuncio(self):
         self._anuncio_activo = False
+
+    # ── Consulta de datos de empleado (registro -> laptop servidor) ───────────
+    def buscar_empleado_red(self, credencial, callback_ok, callback_error):
+        """
+        Busca los datos de un empleado por credencial en el servidor local
+        (laptop en la misma red WiFi, ver empleados_server.py).
+        No requiere internet, solo estar conectado al mismo WiFi/hotspot.
+        callback_ok(dict) se llama con los datos si se encuentra.
+        callback_error(str) se llama con un mensaje si falla o no responde.
+        """
+        credencial = str(credencial).strip()
+
+        def _worker():
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                    sock.settimeout(TIMEOUT_CONSULTA_EMP)
+                    mensaje = f"CONSULTA_EMP|{credencial}".encode('utf-8')
+
+                    for intento in range(REINTENTOS_CONSULTA_EMP):
+                        try:
+                            sock.sendto(mensaje, ('255.255.255.255', PUERTO_CONSULTA_EMP))
+                            datos_raw, addr = sock.recvfrom(4096)
+                            msg    = datos_raw.decode('utf-8').strip()
+                            partes = msg.split('|')
+
+                            if partes[0] == 'EMP_OK' and len(partes) >= 2 and partes[1] == credencial:
+                                # EMP_OK|credencial|nombre|nss|cuadrilla|puesto_clave|puesto_desc
+                                resultado = {
+                                    "nombre":       partes[2] if len(partes) > 2 else "",
+                                    "nss":          partes[3] if len(partes) > 3 else "",
+                                    "cuadrilla":    partes[4] if len(partes) > 4 else "",
+                                    "puesto_clave": partes[5] if len(partes) > 5 else "",
+                                    "puesto_desc":  partes[6] if len(partes) > 6 else "",
+                                }
+                                Clock.schedule_once(lambda dt: callback_ok(resultado), 0)
+                                return
+
+                            if partes[0] == 'EMP_NOTFOUND' and len(partes) >= 2 and partes[1] == credencial:
+                                Clock.schedule_once(
+                                    lambda dt: callback_error(
+                                        f"No existe ningun empleado con credencial {credencial}"
+                                    ), 0
+                                )
+                                return
+                        except socket.timeout:
+                            continue
+
+                    Clock.schedule_once(
+                        lambda dt: callback_error(
+                            "Sin respuesta del servidor. Verifica que la laptop "
+                            "este encendida y conectada al mismo WiFi."
+                        ), 0
+                    )
+            except Exception as e:
+                Clock.schedule_once(lambda dt, err=str(e): callback_error(f"Error de red: {err}"), 0)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Servidor validacion (cuadrillero -> trabajador) ───────────────────────
     def iniciar_servidor_validacion(self, credencial, cuadrilla):
@@ -1528,15 +1548,13 @@ class CredencialAgriCactusApp(MDApp):
                     while self._validacion_activa:
                         try:
                             datos_raw, addr = sock.recvfrom(1024)
-                            msg = _verificar_mensaje(datos_raw)
-                            if msg is None:
-                                continue
+                            msg    = datos_raw.decode('utf-8').strip()
                             partes = msg.split(':')
                             if (len(partes) >= 3 and
                                     partes[0] == 'VALIDAR' and
                                     partes[1] == str(credencial)):
                                 turno = partes[4] if len(partes) > 4 else "matutino"
-                                sock.sendto(_firmar_mensaje(f"OK:{credencial}").encode(), addr)
+                                sock.sendto(f"OK:{credencial}".encode(), addr)
                                 Clock.schedule_once(
                                     lambda dt, t=turno: self._registrar_asistencia(t), 0
                                 )
@@ -1566,16 +1584,14 @@ class CredencialAgriCactusApp(MDApp):
                     while self._autovalidacion_activa:
                         try:
                             datos_raw, addr = sock.recvfrom(1024)
-                            msg = _verificar_mensaje(datos_raw)
-                            if msg is None:
-                                continue
+                            msg    = datos_raw.decode('utf-8').strip()
                             partes = msg.split(':')
                             # Formato: SCAN_FIJO:<credencial>
                             if (len(partes) >= 2 and
                                     partes[0] == 'SCAN_FIJO' and
                                     partes[1] == str(credencial)):
                                 sock.sendto(
-                                    _firmar_mensaje(f"OK_FIJO:{credencial}").encode(), addr
+                                    f"OK_FIJO:{credencial}".encode(), addr
                                 )
                                 Clock.schedule_once(
                                     lambda dt: self._registrar_asistencia("matutino"), 0
@@ -1609,10 +1625,9 @@ class CredencialAgriCactusApp(MDApp):
 
         pa        = self.root.get_screen('activa')
         turno_txt = "MATUTINO" if turno == "matutino" else "VESPERTINO"
-        pa.texto_estado_conexion       = f"✓ Turno {turno_txt}: {ahora.strftime('%H:%M')}"
-        pa.color_estado                = [0.18, 0.42, 0.18, 1]
-        pa.color_indicador_validacion  = [0.10, 0.72, 0.10, 1]   # verde
-        pa.texto_vigencia              = self._texto_vigencia(faltas)
+        pa.texto_estado_conexion = f"✓ Turno {turno_txt}: {ahora.strftime('%H:%M')}"
+        pa.color_estado          = [0.18, 0.42, 0.18, 1]
+        pa.texto_vigencia        = self._texto_vigencia(faltas)
         self._actualizar_texto_turno(pa)
 
         if self.root.current == 'inactiva' and faltas < MAX_FALTAS:
@@ -1676,4 +1691,3 @@ class CredencialAgriCactusApp(MDApp):
 
 if __name__ == '__main__':
     CredencialAgriCactusApp().run()
-
