@@ -1,38 +1,15 @@
-# =============================================================================
-#  AgriCactus - App del TRABAJADOR  (main.py)
-#  v3.4 - Puesto fijo con PIN RH + auto-validacion
-# =============================================================================
-
+import flet as ft
 import datetime
-import traceback
 import json
 import os
 import socket
 import threading
 import time
-
-from kivy.lang import Builder
-from kivy.base import ExceptionHandler, ExceptionManager
-from kivy.clock import Clock
-from kivy.properties import StringProperty, BooleanProperty, ListProperty
-from kivy.uix.screenmanager import Screen, FadeTransition
-from kivy.utils import platform
-from kivymd.app import MDApp
-from kivymd.uix.snackbar import Snackbar
-from kivymd.uix.dialog import MDDialog
-from kivymd.uix.button import MDFlatButton, MDRaisedButton, MDIconButton
-from kivymd.uix.boxlayout import MDBoxLayout
-from kivymd.uix.textfield import MDTextField
-
-try:
-    from plyer import gps, filechooser
-    GPS_DISPONIBLE = True
-except Exception:
-    GPS_DISPONIBLE = False
+import traceback
+import base64
 
 try:
     import qrcode
-    from kivy.core.image import Image as CoreImage
     from io import BytesIO
     QR_DISPONIBLE = True
 except Exception:
@@ -71,24 +48,38 @@ ACTIVIDADES_FIJAS = [
 # =============================================================================
 #  CONSTANTES
 # =============================================================================
-ARCHIVO_DATOS      = "empleado_data.json"
-PUERTO_ANUNCIO     = 45678
-PUERTO_VALIDACION  = 45679
-PUERTO_APUNTADOR   = 45683   # Puerto especial para auto-validacion con apuntador
-PUERTO_CONSULTA_EMP = 45690  # Puerto para consultar datos de empleado en el registro
-TIMEOUT_CONSULTA_EMP = 3.0   # segundos por intento
+ARCHIVO_DATOS       = "empleado_data.json"
+PUERTO_ANUNCIO      = 45678
+PUERTO_VALIDACION   = 45679
+PUERTO_APUNTADOR    = 45683
+PUERTO_CONSULTA_EMP = 45690
+TIMEOUT_CONSULTA_EMP = 3.0
 REINTENTOS_CONSULTA_EMP = 3
-INTERVALO_SIN_CONF = 10
-INTERVALO_CON_CONF = 1800
-MAX_FALTAS         = 3
-DIAS_LABORALES     = {0, 1, 2, 3, 4}
-TOLERANCIA_HORAS   = 2
-DIAS_GRACIA        = 3
-MAX_CONFIRMACIONES = 2
-PIN_RH             = "RH2024"
+INTERVALO_SIN_CONF  = 10
+INTERVALO_CON_CONF  = 1800
+MAX_FALTAS          = 3
+DIAS_LABORALES      = {0, 1, 2, 3, 4}
+TOLERANCIA_HORAS    = 2
+DIAS_GRACIA         = 3
+MAX_CONFIRMACIONES  = 2
+PIN_RH              = "RH2024"
 
 # =============================================================================
-#  PERSISTENCIA
+#  COLORES
+# =============================================================================
+VERDE_OSCURO    = "#2E4A1F"
+DORADO          = "#F5A624"
+VERDE_MEDIO     = "#2E6B2E"
+VERDE_CLARO_BG  = "#F0F5F0"
+CREMA_BG        = "#F5F5F0"
+ROJO            = "#A61414"
+ROJO_OSCURO     = "#801313"
+FONDO_INACTIVA  = "#1A0F0F"
+CARD_INACTIVA   = "#2E1F1F"
+DIVIDER_INACT   = "#593333"
+
+# =============================================================================
+#  PERSISTENCIA  (idéntico al original)
 # =============================================================================
 def guardar_datos(datos: dict):
     try:
@@ -107,17 +98,12 @@ def cargar_datos() -> dict:
     return {}
 
 def obtener_cuadrilla_efectiva(datos: dict) -> str:
-    """
-    Si el trabajador cambio su cuadrilla del dia (porque lo reasignaron a
-    otro cuadrillero), usa esa. Si no, usa la cuadrilla permanente de RH.
-    El cambio del dia se resetea solo al dia siguiente.
-    """
     if datos.get("cuadrilla_dia_fecha") == datetime.date.today().isoformat():
         return datos.get("cuadrilla_dia") or datos.get("cuadrilla", "")
     return datos.get("cuadrilla", "")
 
 # =============================================================================
-#  LOGICA DE FALTAS
+#  LOGICA DE FALTAS  (idéntico al original)
 # =============================================================================
 def es_dia_laboral(fecha: datetime.date) -> bool:
     return fecha.weekday() in DIAS_LABORALES
@@ -196,890 +182,813 @@ def en_periodo_gracia(datos: dict) -> bool:
     except Exception:
         return False
 
-def generar_qr_texture(texto: str):
+# =============================================================================
+#  QR  (adaptado para Flet – devuelve base64 en vez de Kivy texture)
+# =============================================================================
+def generar_qr_base64(texto: str):
     if not QR_DISPONIBLE:
-        print("[QR] Libreria 'qrcode' o Pillow no disponible en este build.")
         return None
     try:
-        qr = qrcode.QRCode(version=1,
-                           error_correction=qrcode.constants.ERROR_CORRECT_M,
-                           box_size=6, border=2)
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=6, border=2,
+        )
         qr.add_data(texto)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white")
         buf = BytesIO()
         img.save(buf, format='PNG')
-        buf.seek(0)
-        return CoreImage(buf, ext='png').texture
+        return base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
         print(f"[QR] Error generando QR: {e}")
         return None
 
 # =============================================================================
-#  INTERFAZ KV
+#  CRASH LOG
 # =============================================================================
+def escribir_crash(exc):
+    try:
+        with open('crash_log.txt', 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*60}\n{datetime.datetime.now().isoformat()}\n")
+            f.write(traceback.format_exc())
+    except Exception:
+        pass
+
 
 # =============================================================================
-#  MANEJADOR DE ERRORES -- registra cualquier fallo inesperado en un archivo
-#  local (crash_log.txt) para poder diagnosticar problemas en telefonos
-#  especificos sin necesitar computadora ni logs de GitHub Actions.
+#  APLICACION PRINCIPAL
 # =============================================================================
-class ManejadorErrores(ExceptionHandler):
-    def handle_exception(self, inst):
+class AgriCactusApp:
+
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.page.title = "AgriCactus"
+        self.page.theme_mode = ft.ThemeMode.LIGHT
+        self.page.padding = 0
+        self.page.bgcolor = CREMA_BG
+        self.pantalla_actual = "registro"
+
+        # ── Estado ──
+        self._anuncio_activo        = False
+        self._validacion_activa     = False
+        self._autovalidacion_activa = False
+        self._lat  = 0.0
+        self._lon  = 0.0
+        self._proximo_anuncio    = None
+        self._confirmaciones_hoy = 0
+        self._ruta_foto          = ""
+        self._puesto_clave_reg   = ""
+        self._puesto_desc_reg    = ""
+        self._pin_puesto_ok      = False
+        self._tipo_bloqueo       = "falta"
+        self._running            = True
+        self._estado_parpadeo    = False
+
+        # ── File picker (en 0.82 es un Service, va en page.services) ──
+        self.file_picker = ft.FilePicker()
+        self.page.services.append(self.file_picker)
+
+        # ── Construir UI ──
+        self._build_all()
+        self.page.add(self.contenedor)
+
+        # ── Restaurar sesión ──
+        self._restaurar_sesion()
+        self.page.update()
+
+        # ── Tareas periódicas ──
+        self._iniciar_tareas()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  HELPERS
+    # ─────────────────────────────────────────────────────────────────────────
+    def snack(self, msg: str):
         try:
-            with open('crash_log.txt', 'a', encoding='utf-8') as f:
-                f.write(f"\n{'='*60}\n{datetime.datetime.now().isoformat()}\n")
-                f.write(''.join(traceback.format_exception(type(inst), inst, inst.__traceback__)))
+            sb = ft.SnackBar(content=ft.Text(msg), duration=2500, open=True)
+            self.page.show_dialog(sb)
         except Exception:
             pass
-        return ExceptionManager.PASS
 
-ExceptionManager.add_handler(ManejadorErrores())
-
-KV = '''
-#:import FadeTransition kivy.uix.screenmanager.FadeTransition
-#:import FitImage kivymd.uix.fitimage.FitImage
-
-ScreenManager:
-    transition: FadeTransition()
-    PantallaRegistro:
-    PantallaActiva:
-    PantallaInactiva:
-    PantallaPuestoFijo:
-
-
-<PantallaRegistro>:
-    name: 'registro'
-
-    MDFloatLayout:
-        md_bg_color: 0.96, 0.96, 0.94, 1
-
-        MDFloatLayout:
-            size_hint_y: 0.15
-            pos_hint: {'x': 0, 'top': 1}
-            md_bg_color: 0.18, 0.29, 0.12, 1
-
-            Image:
-                source: "logo_agricactus.png"
-                size_hint: (0.38, 0.80)
-                allow_stretch: True
-                keep_ratio: True
-                pos_hint: {'center_x': 0.22, 'center_y': 0.5}
-
-            MDLabel:
-                text: "REGISTRO DE EMPLEADO"
-                font_style: "H6"
-                bold: True
-                halign: "center"
-                theme_text_color: "Custom"
-                text_color: 1, 1, 1, 1
-                pos_hint: {'center_x': 0.64, 'center_y': 0.5}
-                size_hint: (0.6, 1)
-
-        MDBoxLayout:
-            size_hint_y: 0.006
-            pos_hint: {'x': 0, 'top': 0.85}
-            md_bg_color: 0.96, 0.65, 0.14, 1
-
-        MDTextField:
-            id: input_nombre
-            hint_text: "Nombre Completo"
-            helper_text: "Se convertira a MAYUSCULAS"
-            helper_text_mode: "on_focus"
-            line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.76}
-            size_hint_x: 0.88
-
-        MDTextField:
-            id: input_nss
-            hint_text: "Numero de Seguro Social (NSS)"
-            max_text_length: 11
-            input_filter: "int"
-            line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.68}
-            size_hint_x: 0.88
-
-        MDBoxLayout:
-            orientation: 'horizontal'
-            size_hint: (0.88, 0.07)
-            pos_hint: {'center_x': 0.5, 'center_y': 0.575}
-            spacing: '6dp'
-
-            MDTextField:
-                id: input_credencial
-                hint_text: "Numero de Credencial / Empleado"
-                input_filter: "int"
-                line_color_focus: 0.18, 0.29, 0.12, 1
-                size_hint_x: 0.68
-                on_text_validate: root.buscar_datos_empleado()
-
-            MDRectangleFlatIconButton:
-                icon: "magnify"
-                text: "BUSCAR"
-                theme_text_color: "Custom"
-                text_color: 0.18, 0.29, 0.12, 1
-                line_color: 0.18, 0.29, 0.12, 1
-                size_hint_x: 0.32
-                pos_hint: {'center_y': 0.4}
-                on_release: root.buscar_datos_empleado()
-
-        MDLabel:
-            id: label_busqueda
-            text: ""
-            font_style: "Caption"
-            halign: "center"
-            theme_text_color: "Custom"
-            text_color: 0.5, 0.5, 0.5, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.525}
-            size_hint_x: 0.88
-
-        MDTextField:
-            id: input_cuadrilla
-            hint_text: "Numero de Cuadrilla"
-            input_filter: "int"
-            line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.44}
-            size_hint_x: 0.88
-
-        MDTextField:
-            id: input_hora_entrada
-            hint_text: "Hora de entrada (ej: 07:00)"
-            helper_text: "Formato 24h"
-            helper_text_mode: "on_focus"
-            line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.34}
-            size_hint_x: 0.88
-
-        MDBoxLayout:
-            orientation: 'horizontal'
-            size_hint: (0.88, 0.07)
-            pos_hint: {'center_x': 0.5, 'center_y': 0.25}
-            spacing: '8dp'
-
-            MDRectangleFlatIconButton:
-                icon: "camera"
-                text: "CAMARA"
-                theme_text_color: "Custom"
-                text_color: 0.18, 0.29, 0.12, 1
-                line_color: 0.18, 0.29, 0.12, 1
-                size_hint_x: 0.5
-                on_release: root.tomar_foto()
-
-            MDRectangleFlatIconButton:
-                icon: "image"
-                text: "GALERIA"
-                theme_text_color: "Custom"
-                text_color: 0.18, 0.29, 0.12, 1
-                line_color: 0.18, 0.29, 0.12, 1
-                size_hint_x: 0.5
-                on_release: root.abrir_galeria()
-
-        MDLabel:
-            id: label_foto
-            text: "Sin foto seleccionada"
-            font_style: "Caption"
-            halign: "center"
-            theme_text_color: "Custom"
-            text_color: 0.5, 0.5, 0.5, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.17}
-
-        MDRaisedButton:
-            text: "GENERAR CREDENCIAL DIGITAL"
-            md_bg_color: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.08}
-            size_hint_x: 0.88
-            elevation: 4
-            on_release: root.guardar_registro()
-
-
-<PantallaActiva>:
-    name: 'activa'
-
-    MDFloatLayout:
-        md_bg_color: 0.94, 0.96, 0.94, 1
-
-        MDFloatLayout:
-            size_hint_x: 0.06
-            pos_hint: {'x': 0, 'y': 0}
-            md_bg_color: 0.18, 0.29, 0.12, 1
-
-        MDCard:
-            size_hint: (0.92, 0.97)
-            pos_hint: {'right': 0.99, 'center_y': 0.50}
-            elevation: 4
-            radius: [16, 16, 16, 16]
-            md_bg_color: 1, 1, 1, 1
-
-            MDFloatLayout:
-
-                # Encabezado
-                MDFloatLayout:
-                    size_hint_y: 0.13
-                    pos_hint: {'x': 0, 'top': 1}
-                    md_bg_color: 0.18, 0.29, 0.12, 1
-
-                    Image:
-                        source: "logo_agricactus.png"
-                        size_hint: (0.40, 0.80)
-                        allow_stretch: True
-                        keep_ratio: True
-                        pos_hint: {'center_x': 0.24, 'center_y': 0.5}
-
-                    MDLabel:
-                        text: "CREDENCIAL DIGITAL"
-                        font_style: "Caption"
-                        bold: True
-                        halign: "center"
-                        theme_text_color: "Custom"
-                        text_color: 0.96, 0.65, 0.14, 1
-                        pos_hint: {'center_x': 0.72, 'center_y': 0.62}
-                        size_hint: (0.52, 0.22)
-
-                    MDLabel:
-                        text: root.texto_vigencia
-                        font_style: "Caption"
-                        halign: "center"
-                        theme_text_color: "Custom"
-                        text_color: 0.78, 0.92, 0.78, 1
-                        pos_hint: {'center_x': 0.72, 'center_y': 0.30}
-                        size_hint: (0.52, 0.22)
-
-                MDBoxLayout:
-                    size_hint: (1, 0.004)
-                    pos_hint: {'x': 0, 'top': 0.87}
-                    md_bg_color: 0.96, 0.65, 0.14, 1
-
-                # Foto
-                FitImage:
-                    source: root.ruta_foto
-                    size_hint: (0.28, 0.23)
-                    pos_hint: {'x': 0.04, 'top': 0.85}
-                    radius: [10, 10, 10, 10]
-
-                # Datos
-                MDLabel:
-                    text: root.nombre_empleado
-                    markup: True
-                    font_style: "H6"
-                    bold: True
-                    halign: "left"
-                    valign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.12, 0.22, 0.08, 1
-                    text_size: self.size
-                    pos_hint: {'x': 0.36, 'top': 0.85}
-                    size_hint: (0.60, 0.12)
-
-                MDLabel:
-                    text: "Ingreso: " + root.fecha_ingreso
-                    font_style: "Caption"
-                    halign: "left"
-                    theme_text_color: "Secondary"
-                    pos_hint: {'x': 0.36, 'top': 0.73}
-                    size_hint: (0.60, 0.04)
-
-                MDLabel:
-                    text: "Cuadrilla: " + root.num_cuadrilla
-                    font_style: "Body2"
-                    bold: True
-                    halign: "left"
-                    theme_text_color: "Custom"
-                    text_color: 0.18, 0.42, 0.18, 1
-                    pos_hint: {'x': 0.36, 'top': 0.69}
-                    size_hint: (0.48, 0.04)
-
-                MDIconButton:
-                    icon: "pencil-circle"
-                    theme_text_color: "Custom"
-                    text_color: 0.18, 0.29, 0.12, 1
-                    pos_hint: {'x': 0.84, 'top': 0.72}
-                    size_hint: (0.14, 0.06)
-                    on_release: root.editar_cuadrilla_dia()
-
-                MDLabel:
-                    text: "NSS: " + root.nss
-                    font_style: "Caption"
-                    halign: "left"
-                    theme_text_color: "Custom"
-                    text_color: 0.4, 0.4, 0.4, 1
-                    pos_hint: {'x': 0.36, 'top': 0.65}
-                    size_hint: (0.60, 0.04)
-
-                # Badge puesto fijo
-                MDCard:
-                    size_hint: (0.88, 0.05)
-                    pos_hint: {'center_x': 0.5, 'top': 0.61}
-                    elevation: 1
-                    radius: [6, 6, 6, 6]
-                    md_bg_color: root.color_badge_puesto
-
-                    MDLabel:
-                        text: root.texto_puesto_fijo
-                        font_style: "Caption"
-                        bold: True
-                        halign: "center"
-                        theme_text_color: "Custom"
-                        text_color: 1, 1, 1, 1
-
-                MDBoxLayout:
-                    size_hint: (0.90, 0.004)
-                    pos_hint: {'center_x': 0.5, 'top': 0.56}
-                    md_bg_color: 0.96, 0.65, 0.14, 1
-
-                # Numero credencial
-                MDLabel:
-                    text: "No. " + root.num_credencial
-                    font_style: "H4"
-                    bold: True
-                    halign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.12, 0.22, 0.08, 1
-                    pos_hint: {'center_x': 0.5, 'top': 0.55}
-                    size_hint: (0.90, 0.09)
-
-                # QR
-                Image:
-                    id: img_qr
-                    size_hint: (0.30, 0.16)
-                    pos_hint: {'center_x': 0.5, 'top': 0.46}
-                    allow_stretch: True
-                    keep_ratio: True
-
-                MDLabel:
-                    id: label_qr_error
-                    text: ""
-                    font_style: "Caption"
-                    halign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.7, 0.2, 0.15, 1
-                    pos_hint: {'center_x': 0.5, 'top': 0.34}
-                    size_hint: (0.90, 0.04)
-
-                MDLabel:
-                    text: "Acceso comedor"
-                    font_style: "Caption"
-                    halign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.5, 0.5, 0.5, 1
-                    pos_hint: {'center_x': 0.5, 'top': 0.30}
-                    size_hint: (0.90, 0.04)
-
-                MDBoxLayout:
-                    size_hint: (0.90, 0.004)
-                    pos_hint: {'center_x': 0.5, 'top': 0.26}
-                    md_bg_color: 0.90, 0.90, 0.90, 1
-
-                # Estado turno
-                MDCard:
-                    size_hint: (0.90, 0.06)
-                    pos_hint: {'center_x': 0.5, 'top': 0.255}
-                    elevation: 1
-                    radius: [8, 8, 8, 8]
-                    md_bg_color: root.color_turno
-
-                    MDLabel:
-                        text: root.texto_turno
-                        font_style: "Caption"
-                        bold: True
-                        halign: "center"
-                        theme_text_color: "Custom"
-                        text_color: 1, 1, 1, 1
-
-                # Estado wifi
-                MDBoxLayout:
-                    orientation: 'horizontal'
-                    size_hint: (0.90, 0.05)
-                    pos_hint: {'center_x': 0.5, 'top': 0.195}
-                    spacing: '6dp'
-                    padding: ['8dp', 0, 0, 0]
-
-                    MDIcon:
-                        icon: "wifi"
-                        theme_text_color: "Custom"
-                        text_color: root.color_icono_wifi
-                        font_size: "18sp"
-                        size_hint_x: None
-                        width: '22dp'
-
-                    MDLabel:
-                        text: root.texto_estado_conexion
-                        font_style: "Caption"
-                        halign: "left"
-                        theme_text_color: "Custom"
-                        text_color: root.color_estado
-
-                MDLabel:
-                    text: root.texto_gps
-                    font_style: "Caption"
-                    halign: "center"
-                    theme_text_color: "Secondary"
-                    pos_hint: {'center_x': 0.5, 'top': 0.145}
-                    size_hint: (0.90, 0.04)
-
-                MDLabel:
-                    text: root.texto_proximo_anuncio
-                    font_style: "Caption"
-                    halign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.29, 0.50, 0.29, 1
-                    pos_hint: {'center_x': 0.5, 'top': 0.105}
-                    size_hint: (0.90, 0.04)
-
-                # Boton puesto fijo
-                MDRectangleFlatIconButton:
-                    icon: "briefcase-edit"
-                    text: "CONFIGURAR PUESTO"
-                    theme_text_color: "Custom"
-                    text_color: 0.18, 0.29, 0.12, 1
-                    line_color: 0.18, 0.29, 0.12, 1
-                    pos_hint: {'center_x': 0.5, 'top': 0.065}
-                    size_hint: (0.88, 0.05)
-                    on_release: app.root.current = 'puesto_fijo'
-
-                # Pie
-                MDFloatLayout:
-                    size_hint_y: 0.04
-                    pos_hint: {'x': 0, 'y': 0}
-                    md_bg_color: 0.18, 0.29, 0.12, 1
-                    MDLabel:
-                        text: "Blvd. Kino 309, Piso 6 - Hermosillo, Sonora"
-                        font_style: "Caption"
-                        halign: "center"
-                        theme_text_color: "Custom"
-                        text_color: 0.8, 0.9, 0.8, 1
-
-
-<PantallaPuestoFijo>:
-    name: 'puesto_fijo'
-
-    MDFloatLayout:
-        md_bg_color: 0.94, 0.96, 0.94, 1
-
-        MDFloatLayout:
-            size_hint_y: 0.13
-            pos_hint: {'x': 0, 'top': 1}
-            md_bg_color: 0.18, 0.29, 0.12, 1
-
-            MDLabel:
-                text: "CONFIGURAR PUESTO FIJO"
-                font_style: "H6"
-                bold: True
-                halign: "center"
-                theme_text_color: "Custom"
-                text_color: 0.96, 0.65, 0.14, 1
-                pos_hint: {'center_x': 0.5, 'center_y': 0.5}
-                size_hint: (1, 1)
-
-        MDBoxLayout:
-            size_hint_y: 0.004
-            pos_hint: {'x': 0, 'top': 0.87}
-            md_bg_color: 0.96, 0.65, 0.14, 1
-
-        MDCard:
-            size_hint: (0.92, 0.20)
-            pos_hint: {'center_x': 0.5, 'top': 0.85}
-            elevation: 2
-            radius: [10, 10, 10, 10]
-            md_bg_color: 1, 1, 1, 1
-
-            MDBoxLayout:
-                orientation: 'vertical'
-                padding: '12dp'
-                spacing: '8dp'
-
-                MDLabel:
-                    text: "Puesto fijo actual:"
-                    font_style: "Caption"
-                    halign: "center"
-                    theme_text_color: "Secondary"
-
-                MDLabel:
-                    id: label_puesto_actual
-                    text: root.puesto_actual
-                    font_style: "Body1"
-                    bold: True
-                    halign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.18, 0.42, 0.18, 1
-
-        MDCard:
-            size_hint: (0.92, 0.14)
-            pos_hint: {'center_x': 0.5, 'top': 0.63}
-            elevation: 2
-            radius: [10, 10, 10, 10]
-            md_bg_color: 1, 1, 1, 1
-
-            MDBoxLayout:
-                orientation: 'horizontal'
-                padding: '10dp'
-                spacing: '8dp'
-
-                MDTextField:
-                    id: input_pin_puesto
-                    hint_text: "PIN de RH para configurar"
-                    password: True
-                    line_color_focus: 0.18, 0.29, 0.12, 1
-                    size_hint_x: 0.6
-
-                MDRaisedButton:
-                    text: "VERIFICAR"
-                    md_bg_color: 0.18, 0.29, 0.12, 1
-                    size_hint_x: 0.4
-                    on_release: root.verificar_pin()
-
-        MDRectangleFlatIconButton:
-            id: btn_actualizar_red
-            icon: "wifi-sync"
-            text: "ACTUALIZAR PUESTO DESDE RED (RH)"
-            theme_text_color: "Custom"
-            text_color: 0.18, 0.29, 0.12, 1
-            line_color: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'top': 0.605}
-            size_hint: (0.92, None)
-            height: '40dp'
-            disabled: True
-            on_release: root.actualizar_puesto_desde_red()
-
-        MDLabel:
-            id: label_estado_red_puesto
-            text: ""
-            font_style: "Caption"
-            halign: "center"
-            theme_text_color: "Custom"
-            text_color: 0.5, 0.5, 0.5, 1
-            pos_hint: {'center_x': 0.5, 'top': 0.555}
-            size_hint: (0.92, None)
-            height: '18dp'
-
-        MDTextField:
-            id: input_buscar_puesto
-            hint_text: "Buscar puesto por nombre o clave..."
-            line_color_focus: 0.18, 0.29, 0.12, 1
-            pos_hint: {'center_x': 0.5, 'top': 0.51}
-            size_hint: (0.92, None)
-            height: '48dp'
-            disabled: True
-            on_text: root.filtrar_puestos(self.text)
-
-        ScrollView:
-            size_hint: (0.92, 0.30)
-            pos_hint: {'center_x': 0.5, 'top': 0.43}
-            id: scroll_puestos
-
-            MDList:
-                id: lista_puestos
-
-        MDBoxLayout:
-            orientation: 'horizontal'
-            size_hint: (0.92, 0.08)
-            pos_hint: {'center_x': 0.5, 'y': 0.02}
-            spacing: '8dp'
-
-            MDRaisedButton:
-                text: "QUITAR PUESTO FIJO"
-                md_bg_color: 0.65, 0.08, 0.08, 1
-                size_hint_x: 0.5
-                on_release: root.quitar_puesto()
-
-            MDRectangleFlatButton:
-                text: "CANCELAR"
-                theme_text_color: "Custom"
-                text_color: 0.18, 0.29, 0.12, 1
-                line_color: 0.18, 0.29, 0.12, 1
-                size_hint_x: 0.5
-                on_release: app.root.current = 'activa'
-
-
-<PantallaInactiva>:
-    name: 'inactiva'
-
-    MDFloatLayout:
-        md_bg_color: 0.10, 0.06, 0.06, 1
-
-        MDFloatLayout:
-            size_hint_y: 0.18
-            pos_hint: {'x': 0, 'top': 1}
-            md_bg_color: 0.65, 0.08, 0.08, 1
-
-            Image:
-                source: "logo_agricactus.png"
-                size_hint: (0.28, 0.65)
-                allow_stretch: True
-                keep_ratio: True
-                pos_hint: {'center_x': 0.5, 'center_y': 0.5}
-                opacity: 0.35
-
-        MDIcon:
-            icon: "lock-alert"
-            theme_text_color: "Custom"
-            text_color: 0.80, 0.12, 0.12, 1
-            font_size: "60sp"
-            pos_hint: {'center_x': 0.5, 'center_y': 0.74}
-
-        MDLabel:
-            text: "CREDENCIAL BLOQUEADA"
-            font_style: "H5"
-            bold: True
-            halign: "center"
-            theme_text_color: "Custom"
-            text_color: 1, 1, 1, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.64}
-            size_hint: (0.9, 0.07)
-
-        MDLabel:
-            text: root.motivo_bloqueo
-            font_style: "Body2"
-            halign: "center"
-            theme_text_color: "Custom"
-            text_color: 0.9, 0.7, 0.7, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.56}
-            size_hint: (0.88, 0.08)
-
-        MDLabel:
-            text: root.texto_faltas
-            font_style: "H6"
-            bold: True
-            halign: "center"
-            theme_text_color: "Custom"
-            text_color: 0.96, 0.65, 0.14, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.49}
-            size_hint: (0.88, 0.06)
-
-        MDBoxLayout:
-            size_hint: (0.82, 0.003)
-            pos_hint: {'center_x': 0.5, 'center_y': 0.43}
-            md_bg_color: 0.35, 0.20, 0.20, 1
-
-        MDCard:
-            size_hint: (0.88, 0.15)
-            pos_hint: {'center_x': 0.5, 'center_y': 0.34}
-            elevation: 2
-            radius: [10, 10, 10, 10]
-            md_bg_color: 0.18, 0.12, 0.12, 1
-
-            MDBoxLayout:
-                orientation: 'vertical'
-                padding: '10dp'
-                spacing: '4dp'
-
-                MDIcon:
-                    icon: "office-building"
-                    theme_text_color: "Custom"
-                    text_color: 0.96, 0.65, 0.14, 1
-                    font_size: "22sp"
-                    halign: "center"
-
-                MDLabel:
-                    text: "Presentate a Recursos Humanos"
-                    font_style: "Body1"
-                    bold: True
-                    halign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.96, 0.65, 0.14, 1
-
-                MDLabel:
-                    text: "RH evaluara tus faltas e incapacidades\\ny desbloqueara tu credencial si procede."
-                    font_style: "Caption"
-                    halign: "center"
-                    theme_text_color: "Custom"
-                    text_color: 0.72, 0.55, 0.55, 1
-
-        MDBoxLayout:
-            size_hint: (0.82, 0.003)
-            pos_hint: {'center_x': 0.5, 'center_y': 0.23}
-            md_bg_color: 0.35, 0.20, 0.20, 1
-
-        MDLabel:
-            text: "Desbloqueo autorizado por RH:"
-            font_style: "Caption"
-            halign: "center"
-            theme_text_color: "Custom"
-            text_color: 0.60, 0.60, 0.60, 1
-            pos_hint: {'center_x': 0.5, 'center_y': 0.19}
-            size_hint: (0.88, 0.04)
-
-        MDBoxLayout:
-            orientation: 'horizontal'
-            size_hint: (0.88, 0.07)
-            pos_hint: {'center_x': 0.5, 'center_y': 0.13}
-            spacing: '6dp'
-
-            MDRaisedButton:
-                id: btn_tipo_falta
-                text: "FALTAS"
-                md_bg_color: 0.50, 0.15, 0.15, 1
-                size_hint_x: 0.33
-                on_release: root.seleccionar_tipo('falta')
-
-            MDRaisedButton:
-                id: btn_tipo_incapacidad
-                text: "INCAPACIDAD"
-                md_bg_color: 0.18, 0.38, 0.18, 1
-                size_hint_x: 0.33
-                on_release: root.seleccionar_tipo('incapacidad')
-
-            MDRaisedButton:
-                id: btn_tipo_vacaciones
-                text: "VACACIONES"
-                md_bg_color: 0.18, 0.29, 0.45, 1
-                size_hint_x: 0.34
-                on_release: root.seleccionar_tipo('vacaciones')
-
-        MDBoxLayout:
-            orientation: 'horizontal'
-            size_hint: (0.88, 0.08)
-            pos_hint: {'center_x': 0.5, 'center_y': 0.05}
-            spacing: '8dp'
-
-            MDTextField:
-                id: pin_input
-                hint_text: "PIN de RH"
-                password: True
-                line_color_focus: 0.96, 0.65, 0.14, 1
-                hint_text_color_focus: 0.96, 0.65, 0.14, 1
-                text_color_focus: 1, 1, 1, 1
-                size_hint_x: 0.5
-                halign: "center"
-
-            MDRaisedButton:
-                text: "APLICAR"
-                md_bg_color: 0.96, 0.65, 0.14, 1
-                text_color: 0.12, 0.22, 0.08, 1
-                size_hint_x: 0.5
-                elevation: 4
-                on_release: root.intentar_reactivacion()
-'''
-
-
-# =============================================================================
-#  CLASES DE PANTALLA
-# =============================================================================
-class PantallaRegistro(Screen):
-    ruta_foto_seleccionada    = ""
-    _puesto_clave_encontrado  = ""
-    _puesto_desc_encontrado   = ""
-
-    def tomar_foto(self):
-        if platform == 'android':
-            try:
-                from android.permissions import request_permissions, Permission
-                from android import activity as android_activity
-                from jnius import autoclass
-                request_permissions([
-                    Permission.CAMERA,
-                    Permission.WRITE_EXTERNAL_STORAGE,
-                    Permission.READ_EXTERNAL_STORAGE
-                ])
-                Intent         = autoclass('android.content.Intent')
-                MediaStore     = autoclass('android.provider.MediaStore')
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                PythonActivity.mActivity.startActivityForResult(intent, 1001)
-                android_activity.bind(on_activity_result=self._resultado_camara)
-            except Exception as e:
-                self.ids.label_foto.text = f"Error: {e}"
-        else:
-            self.ids.label_foto.text = "Camara solo en Android"
-
-    def _resultado_camara(self, requestCode, resultCode, intent):
-        RESULT_OK = -1
-        if requestCode != 1001 or resultCode != RESULT_OK:
-            return
+    def ir_a(self, nombre: str):
+        vistas = {
+            "registro":    self.vista_registro,
+            "activa":      self.vista_activa,
+            "inactiva":    self.vista_inactiva,
+            "puesto_fijo": self.vista_puesto_fijo,
+        }
+        self.pantalla_actual = nombre
+        self.contenedor.content = vistas.get(nombre, self.vista_registro)
+        if nombre == "puesto_fijo":
+            self._on_enter_puesto_fijo()
         try:
-            from jnius import autoclass
-            PythonActivity       = autoclass('org.kivy.android.PythonActivity')
-            FileOutputStream     = autoclass('java.io.FileOutputStream')
-            BitmapCompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-            extras    = intent.getExtras()
-            bitmap    = extras.get("data")
-            files_dir = PythonActivity.mActivity.getFilesDir().getAbsolutePath()
-            ruta      = f"{files_dir}/agricactus_foto.jpg"
-            fos = FileOutputStream(ruta)
-            bitmap.compress(BitmapCompressFormat.JPEG, 90, fos)
-            fos.close()
-            self.ruta_foto_seleccionada = ruta
-            self.ids.label_foto.text    = "Foto tomada"
-        except Exception as e:
-            self.ids.label_foto.text = f"Error: {e}"
+            self.page.update()
+        except Exception:
+            pass
 
-    def abrir_galeria(self):
-        if GPS_DISPONIBLE:
-            try:
-                from plyer import filechooser as fc
-                fc.open_file(
-                    title="Foto de perfil",
-                    filters=[("Imagenes", "*.jpg", "*.jpeg", "*.png")],
-                    on_selection=self.al_seleccionar_foto
-                )
-            except Exception as e:
-                self.ids.label_foto.text = f"Error: {e}"
-
-    def al_seleccionar_foto(self, seleccion):
-        if seleccion:
-            self.ruta_foto_seleccionada = seleccion[0]
-            self.ids.label_foto.text    = f"OK: {os.path.basename(seleccion[0])}"
-
-    def buscar_datos_empleado(self):
-        credencial = self.ids.input_credencial.text.strip()
-        if not credencial:
-            Snackbar(text="Escribe primero el numero de credencial").open()
-            return
-
-        self.ids.label_busqueda.text       = "Buscando en la red..."
-        self.ids.label_busqueda.text_color = (0.5, 0.5, 0.5, 1)
-
-        app = MDApp.get_running_app()
-        app.buscar_empleado_red(
-            credencial,
-            callback_ok=self._al_encontrar_empleado,
-            callback_error=self._al_fallar_busqueda,
+    def _header(self, titulo: str, bgcolor=VERDE_OSCURO):
+        return ft.Container(
+            bgcolor=bgcolor,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            content=ft.Row([
+                ft.Image(
+                    src="logo_agricactus.png",
+                    width=110, height=45,
+                    fit='contain',
+                    error_content=ft.Text("AgriCactus", color="white",
+                                          weight=ft.FontWeight.BOLD),
+                ),
+                ft.Text(
+                    titulo, color="white", size=17,
+                    weight=ft.FontWeight.BOLD,
+                    expand=True, text_align=ft.TextAlign.CENTER,
+                ),
+            ]),
         )
 
-    def _al_encontrar_empleado(self, datos: dict):
-        self.ids.input_nombre.text    = datos.get("nombre", "")
-        self.ids.input_nss.text       = datos.get("nss", "")
-        self.ids.input_cuadrilla.text = datos.get("cuadrilla", "")
+    def _divider_dorado(self):
+        return ft.Container(height=4, bgcolor=DORADO)
 
-        self._puesto_clave_encontrado = datos.get("puesto_clave", "")
-        self._puesto_desc_encontrado  = datos.get("puesto_desc", "")
+    # ─────────────────────────────────────────────────────────────────────────
+    #  CONSTRUIR UI
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_all(self):
+        self._build_registro()
+        self._build_activa()
+        self._build_inactiva()
+        self._build_puesto_fijo()
+        self.contenedor = ft.Container(
+            expand=True,
+            content=self.vista_registro,
+        )
 
-        self.ids.label_busqueda.text       = f"✓ Encontrado: {datos.get('nombre', '')}"
-        self.ids.label_busqueda.text_color = (0.18, 0.42, 0.18, 1)
-        Snackbar(text="Datos del empleado cargados").open()
+    # ── REGISTRO ─────────────────────────────────────────────────────────────
+    def _build_registro(self):
+        self.inp_nombre = ft.TextField(
+            label="Nombre Completo",
+            helper="Se convertirá a MAYÚSCULAS",
+            focused_border_color=VERDE_OSCURO,
+            cursor_color=VERDE_OSCURO,
+        )
+        self.inp_nss = ft.TextField(
+            label="Número de Seguro Social (NSS)",
+            max_length=11,
+            input_filter=ft.NumbersOnlyInputFilter(),
+            focused_border_color=VERDE_OSCURO,
+            cursor_color=VERDE_OSCURO,
+        )
+        self.inp_credencial = ft.TextField(
+            label="No. de Credencial / Empleado",
+            input_filter=ft.NumbersOnlyInputFilter(),
+            focused_border_color=VERDE_OSCURO,
+            cursor_color=VERDE_OSCURO,
+            expand=True,
+            on_submit=lambda e: self._buscar_empleado(e),
+        )
+        self.lbl_busqueda = ft.Text("", size=12, color=ft.Colors.GREY)
+        self.inp_cuadrilla = ft.TextField(
+            label="Número de Cuadrilla",
+            input_filter=ft.NumbersOnlyInputFilter(),
+            focused_border_color=VERDE_OSCURO,
+            cursor_color=VERDE_OSCURO,
+        )
+        self.inp_hora = ft.TextField(
+            label="Hora de entrada (ej: 07:00)",
+            helper="Formato 24h",
+            focused_border_color=VERDE_OSCURO,
+            cursor_color=VERDE_OSCURO,
+        )
+        self.lbl_foto = ft.Text(
+            "Sin foto seleccionada", size=12,
+            color=ft.Colors.GREY, text_align=ft.TextAlign.CENTER,
+        )
 
-    def _al_fallar_busqueda(self, mensaje: str):
-        self.ids.label_busqueda.text       = mensaje
-        self.ids.label_busqueda.text_color = (0.7, 0.2, 0.15, 1)
-        Snackbar(text=mensaje).open()
+        self.vista_registro = ft.Column(
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+            spacing=0,
+            controls=[
+                self._header("REGISTRO DE EMPLEADO"),
+                self._divider_dorado(),
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=14),
+                    content=ft.Column(spacing=10, controls=[
+                        self.inp_nombre,
+                        self.inp_nss,
+                        ft.Row([
+                            self.inp_credencial,
+                            ft.OutlinedButton(
+                                "BUSCAR", icon=ft.Icons.SEARCH,
+                                style=ft.ButtonStyle(color=VERDE_OSCURO,
+                                    side=ft.BorderSide(1, VERDE_OSCURO)),
+                                on_click=self._buscar_empleado,
+                            ),
+                        ], spacing=8),
+                        self.lbl_busqueda,
+                        self.inp_cuadrilla,
+                        self.inp_hora,
+                        ft.Row([
+                            ft.OutlinedButton(
+                                "CÁMARA", icon=ft.Icons.CAMERA_ALT,
+                                expand=True,
+                                style=ft.ButtonStyle(color=VERDE_OSCURO,
+                                    side=ft.BorderSide(1, VERDE_OSCURO)),
+                                on_click=self._tomar_foto,
+                            ),
+                            ft.OutlinedButton(
+                                "GALERÍA", icon=ft.Icons.IMAGE,
+                                expand=True,
+                                style=ft.ButtonStyle(color=VERDE_OSCURO,
+                                    side=ft.BorderSide(1, VERDE_OSCURO)),
+                                on_click=self._abrir_galeria,
+                            ),
+                        ], spacing=8),
+                        self.lbl_foto,
+                        ft.Container(height=6),
+                        ft.Button(
+                            "GENERAR CREDENCIAL DIGITAL",
+                            bgcolor=VERDE_OSCURO, color="white",
+                            width=9999, height=48,
+                            elevation=4,
+                            on_click=self._guardar_registro,
+                        ),
+                    ]),
+                ),
+            ],
+        )
 
-    def guardar_registro(self):
-        nombre       = self.ids.input_nombre.text.strip().upper()
-        nss          = self.ids.input_nss.text.strip()
-        credencial   = self.ids.input_credencial.text.strip()
-        cuadrilla    = self.ids.input_cuadrilla.text.strip()
-        hora_entrada = self.ids.input_hora_entrada.text.strip()
+    # ── ACTIVA (credencial) ──────────────────────────────────────────────────
+    def _build_activa(self):
+        self.lbl_vigencia = ft.Text(
+            "Sin faltas consecutivas", size=11,
+            color="#C7EBC7",
+        )
+        self.img_foto = ft.Image(
+            src="", width=85, height=105,
+            fit='cover',
+            error_content=ft.Container(
+                width=85, height=105, bgcolor=ft.Colors.GREY_300,
+                alignment=ft.Alignment.CENTER,
+                content=ft.Icon(ft.Icons.PERSON, size=40, color=ft.Colors.GREY_500),
+            ),
+        )
+        self.lbl_nombre = ft.Text(
+            "", size=17, weight=ft.FontWeight.BOLD,
+            color="#1F3814",
+        )
+        self.lbl_ingreso = ft.Text("Ingreso: ", size=11, color=ft.Colors.GREY_600)
+        self.lbl_cuadrilla = ft.Text(
+            "Cuadrilla: ", size=14,
+            weight=ft.FontWeight.BOLD, color=VERDE_MEDIO,
+        )
+        self.lbl_nss = ft.Text("NSS: ", size=11, color=ft.Colors.GREY_600)
+
+        self.lbl_puesto_badge = ft.Text(
+            "Sin puesto fijo configurado",
+            size=12, weight=ft.FontWeight.BOLD,
+            color="white", text_align=ft.TextAlign.CENTER,
+        )
+        self.cont_puesto_badge = ft.Container(
+            bgcolor=ft.Colors.GREY,
+            border_radius=6, padding=ft.Padding.symmetric(vertical=8, horizontal=12),
+            content=self.lbl_puesto_badge,
+            alignment=ft.Alignment.CENTER,
+        )
+
+        self.lbl_num_cred = ft.Text(
+            "No. ", size=32, weight=ft.FontWeight.BOLD,
+            color="#1F3814", text_align=ft.TextAlign.CENTER,
+        )
+        self.img_qr = ft.Image(
+            src="", width=110, height=110,
+            fit='contain', visible=False,
+        )
+        self.lbl_qr_error = ft.Text(
+            "", size=11, color="#B33326",
+            text_align=ft.TextAlign.CENTER,
+        )
+
+        self.lbl_turno = ft.Text(
+            "Sin confirmar — emitiendo cada 10s",
+            size=12, weight=ft.FontWeight.BOLD,
+            color="white", text_align=ft.TextAlign.CENTER,
+        )
+        self.cont_turno = ft.Container(
+            bgcolor=DORADO, border_radius=8,
+            padding=ft.Padding.symmetric(vertical=10, horizontal=12),
+            content=self.lbl_turno,
+            alignment=ft.Alignment.CENTER,
+        )
+
+        self.icon_wifi = ft.Icon(
+            ft.Icons.WIFI, size=18, color=DORADO,
+        )
+        self.lbl_estado_wifi = ft.Text(
+            "Buscando cuadrillero...", size=12,
+            color=ft.Colors.GREY_600,
+        )
+        self.lbl_gps = ft.Text(
+            "GPS: sin señal", size=11,
+            color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER,
+        )
+        self.lbl_prox_anuncio = ft.Text(
+            "Emitiendo cada 10s...", size=11,
+            color=VERDE_MEDIO, text_align=ft.TextAlign.CENTER,
+        )
+
+        card_content = ft.Column(
+            spacing=0, expand=True,
+            scroll=ft.ScrollMode.AUTO,
+            controls=[
+                # Header
+                ft.Container(
+                    bgcolor=VERDE_OSCURO,
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                    border_radius=ft.BorderRadius.only(top_left=14, top_right=14),
+                    content=ft.Row([
+                        ft.Image(
+                            src="logo_agricactus.png",
+                            width=100, height=40, fit='contain',
+                            error_content=ft.Text("AgriCactus", color="white",
+                                                   weight=ft.FontWeight.BOLD, size=12),
+                        ),
+                        ft.Column([
+                            ft.Text("CREDENCIAL DIGITAL", size=11,
+                                     weight=ft.FontWeight.BOLD, color=DORADO),
+                            self.lbl_vigencia,
+                        ], spacing=2, expand=True,
+                           horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    ]),
+                ),
+                ft.Container(height=3, bgcolor=DORADO),
+
+                # Datos empleado
+                ft.Container(
+                    padding=ft.Padding.only(left=12, right=12, top=10, bottom=6),
+                    content=ft.Row([
+                        ft.Container(
+                            width=85, height=105, border_radius=10,
+                            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                            content=self.img_foto,
+                        ),
+                        ft.Column([
+                            self.lbl_nombre,
+                            self.lbl_ingreso,
+                            ft.Row([
+                                self.lbl_cuadrilla,
+                                ft.IconButton(
+                                    icon=ft.Icons.EDIT, icon_size=18,
+                                    icon_color=VERDE_OSCURO,
+                                    tooltip="Cambiar cuadrilla del día",
+                                    on_click=self._editar_cuadrilla_dia,
+                                ),
+                            ], spacing=0),
+                            self.lbl_nss,
+                        ], spacing=2, expand=True),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.START),
+                ),
+
+                # Badge puesto fijo
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=2),
+                    content=self.cont_puesto_badge,
+                ),
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=14),
+                    content=ft.Container(height=3, bgcolor=DORADO),
+                ),
+
+                # Número de credencial
+                ft.Container(
+                    padding=ft.Padding.only(top=4, bottom=0),
+                    alignment=ft.Alignment.CENTER,
+                    content=self.lbl_num_cred,
+                ),
+
+                # QR
+                ft.Container(
+                    alignment=ft.Alignment.CENTER,
+                    padding=ft.Padding.only(top=2, bottom=0),
+                    content=self.img_qr,
+                ),
+                ft.Container(
+                    alignment=ft.Alignment.CENTER,
+                    content=self.lbl_qr_error,
+                ),
+                ft.Text(
+                    "Acceso comedor", size=11,
+                    color=ft.Colors.GREY_500,
+                    text_align=ft.TextAlign.CENTER,
+                    width=9999,
+                ),
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=4),
+                    content=ft.Divider(height=1, color=ft.Colors.GREY_300),
+                ),
+
+                # Turno
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=2),
+                    content=self.cont_turno,
+                ),
+
+                # WiFi
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=4),
+                    content=ft.Row([
+                        self.icon_wifi,
+                        self.lbl_estado_wifi,
+                    ], spacing=6),
+                ),
+                ft.Container(
+                    alignment=ft.Alignment.CENTER,
+                    content=self.lbl_gps,
+                ),
+                ft.Container(
+                    alignment=ft.Alignment.CENTER,
+                    padding=ft.Padding.only(bottom=6),
+                    content=self.lbl_prox_anuncio,
+                ),
+
+                # Botón puesto fijo
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=2),
+                    content=ft.OutlinedButton(
+                        "CONFIGURAR PUESTO",
+                        icon=ft.Icons.WORK_OUTLINE,
+                        width=9999,
+                        style=ft.ButtonStyle(
+                            color=VERDE_OSCURO,
+                            side=ft.BorderSide(1, VERDE_OSCURO),
+                        ),
+                        on_click=lambda e: self.ir_a("puesto_fijo"),
+                    ),
+                ),
+
+                # Footer
+                ft.Container(
+                    bgcolor=VERDE_OSCURO,
+                    padding=ft.Padding.symmetric(vertical=6),
+                    border_radius=ft.BorderRadius.only(bottom_left=14, bottom_right=14),
+                    content=ft.Text(
+                        "Blvd. Kino 309, Piso 6 - Hermosillo, Sonora",
+                        size=10, color="#CCDDCC",
+                        text_align=ft.TextAlign.CENTER, width=9999,
+                    ),
+                ),
+            ],
+        )
+
+        self.vista_activa = ft.Row(
+            expand=True, spacing=0,
+            controls=[
+                ft.Container(width=18, bgcolor=VERDE_OSCURO),
+                ft.Container(
+                    expand=True,
+                    padding=ft.Padding.only(right=4, top=4, bottom=4),
+                    content=ft.Card(
+                        elevation=4,
+                        content=ft.Container(
+                            border_radius=16,
+                            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                            content=card_content,
+                        ),
+                    ),
+                ),
+            ],
+        )
+
+    # ── INACTIVA (bloqueada) ─────────────────────────────────────────────────
+    def _build_inactiva(self):
+        self.lbl_motivo = ft.Text(
+            "3 faltas consecutivas registradas.",
+            size=14, color="#E6B3B3",
+            text_align=ft.TextAlign.CENTER,
+        )
+        self.lbl_faltas_inact = ft.Text(
+            "Presentate a Recursos Humanos",
+            size=18, weight=ft.FontWeight.BOLD,
+            color=DORADO, text_align=ft.TextAlign.CENTER,
+        )
+
+        self.btn_falta = ft.Button(
+            "FALTAS", bgcolor="#801326", color="white",
+            expand=True, on_click=lambda e: self._sel_tipo("falta"),
+        )
+        self.btn_incapacidad = ft.Button(
+            "INCAPACIDAD", bgcolor=VERDE_MEDIO, color="white",
+            expand=True, on_click=lambda e: self._sel_tipo("incapacidad"),
+        )
+        self.btn_vacaciones = ft.Button(
+            "VACACIONES", bgcolor="#2E4A73", color="white",
+            expand=True, on_click=lambda e: self._sel_tipo("vacaciones"),
+        )
+        self.inp_pin_desbloqueo = ft.TextField(
+            label="PIN de RH", password=True,
+            can_reveal_password=True, expand=True,
+            focused_border_color=DORADO,
+            cursor_color=DORADO,
+            label_style=ft.TextStyle(color=DORADO),
+            color="white",
+            border_color="#593333",
+        )
+
+        self.vista_inactiva = ft.Container(
+            expand=True, bgcolor=FONDO_INACTIVA,
+            content=ft.Column(
+                expand=True, scroll=ft.ScrollMode.AUTO, spacing=0,
+                controls=[
+                    # Header rojo
+                    ft.Container(
+                        bgcolor=ROJO, height=90,
+                        alignment=ft.Alignment.CENTER,
+                        content=ft.Image(
+                            src="logo_agricactus.png",
+                            width=100, height=50, fit='contain',
+                            opacity=0.35,
+                            error_content=ft.Text("AgriCactus", color="white",
+                                                   opacity=0.35),
+                        ),
+                    ),
+                    ft.Container(height=16),
+                    ft.Icon(ft.Icons.LOCK, size=55, color="#CC1F1F"),
+                    ft.Container(height=8),
+                    ft.Text(
+                        "CREDENCIAL BLOQUEADA", size=22,
+                        weight=ft.FontWeight.BOLD, color="white",
+                        text_align=ft.TextAlign.CENTER, width=9999,
+                    ),
+                    ft.Container(height=8),
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=20),
+                        content=self.lbl_motivo,
+                    ),
+                    ft.Container(height=8),
+                    self.lbl_faltas_inact,
+                    ft.Container(height=10),
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=30),
+                        content=ft.Divider(height=2, color=DIVIDER_INACT),
+                    ),
+                    ft.Container(height=10),
+                    # Card instrucciones
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=20),
+                        content=ft.Card(
+                            bgcolor=CARD_INACTIVA, elevation=2,
+                            content=ft.Container(
+                                padding=14,
+                                content=ft.Column([
+                                    ft.Icon(ft.Icons.BUSINESS, color=DORADO, size=22),
+                                    ft.Text("Preséntate a Recursos Humanos",
+                                             size=15, weight=ft.FontWeight.BOLD,
+                                             color=DORADO, text_align=ft.TextAlign.CENTER,
+                                             width=9999),
+                                    ft.Text("RH evaluará tus faltas e incapacidades\ny desbloqueará tu credencial si procede.",
+                                             size=11, color="#B88E8E",
+                                             text_align=ft.TextAlign.CENTER, width=9999),
+                                ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            ),
+                        ),
+                    ),
+                    ft.Container(height=10),
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=30),
+                        content=ft.Divider(height=2, color=DIVIDER_INACT),
+                    ),
+                    ft.Container(height=8),
+                    ft.Text(
+                        "Desbloqueo autorizado por RH:",
+                        size=11, color=ft.Colors.GREY_500,
+                        text_align=ft.TextAlign.CENTER, width=9999,
+                    ),
+                    ft.Container(height=6),
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=20),
+                        content=ft.Row([
+                            self.btn_falta, self.btn_incapacidad, self.btn_vacaciones,
+                        ], spacing=6),
+                    ),
+                    ft.Container(height=10),
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=20),
+                        content=ft.Row([
+                            self.inp_pin_desbloqueo,
+                            ft.Button(
+                                "APLICAR", bgcolor=DORADO, color="#1F3814",
+                                height=48, elevation=4,
+                                on_click=self._intentar_reactivacion,
+                            ),
+                        ], spacing=8),
+                    ),
+                    ft.Container(height=20),
+                ],
+            ),
+        )
+
+    # ── PUESTO FIJO ──────────────────────────────────────────────────────────
+    def _build_puesto_fijo(self):
+        self.lbl_puesto_actual = ft.Text(
+            "Sin configurar", size=15,
+            weight=ft.FontWeight.BOLD, color=VERDE_MEDIO,
+            text_align=ft.TextAlign.CENTER, width=9999,
+        )
+        self.inp_pin_puesto = ft.TextField(
+            label="PIN de RH para configurar",
+            password=True, can_reveal_password=True,
+            focused_border_color=VERDE_OSCURO, cursor_color=VERDE_OSCURO,
+            expand=True,
+        )
+        self.btn_actualizar_red = ft.OutlinedButton(
+            "ACTUALIZAR PUESTO DESDE RED (RH)",
+            icon=ft.Icons.WIFI_PROTECTED_SETUP,
+            width=9999, disabled=True,
+            style=ft.ButtonStyle(color=VERDE_OSCURO,
+                side=ft.BorderSide(1, VERDE_OSCURO)),
+            on_click=self._actualizar_puesto_red,
+        )
+        self.lbl_estado_red = ft.Text(
+            "", size=11, color=ft.Colors.GREY,
+            text_align=ft.TextAlign.CENTER, width=9999,
+        )
+        self.inp_buscar_puesto = ft.TextField(
+            label="Buscar puesto por nombre o clave...",
+            focused_border_color=VERDE_OSCURO, cursor_color=VERDE_OSCURO,
+            disabled=True,
+            on_change=self._filtrar_puestos,
+        )
+        self.lista_puestos = ft.ListView(
+            expand=True, spacing=2, padding=0,
+        )
+
+        self.vista_puesto_fijo = ft.Column(
+            expand=True, spacing=0,
+            controls=[
+                self._header("CONFIGURAR PUESTO FIJO"),
+                self._divider_dorado(),
+                ft.Container(
+                    padding=ft.Padding.all(14),
+                    content=ft.Column(spacing=10, controls=[
+                        # Puesto actual
+                        ft.Card(
+                            elevation=2,
+                            content=ft.Container(
+                                padding=14,
+                                content=ft.Column([
+                                    ft.Text("Puesto fijo actual:", size=12,
+                                             color=ft.Colors.GREY_600,
+                                             text_align=ft.TextAlign.CENTER, width=9999),
+                                    self.lbl_puesto_actual,
+                                ], spacing=6),
+                            ),
+                        ),
+                        # PIN
+                        ft.Card(
+                            elevation=2,
+                            content=ft.Container(
+                                padding=10,
+                                content=ft.Row([
+                                    self.inp_pin_puesto,
+                                    ft.Button(
+                                        "VERIFICAR",
+                                        bgcolor=VERDE_OSCURO, color="white",
+                                        on_click=self._verificar_pin_puesto,
+                                    ),
+                                ], spacing=8),
+                            ),
+                        ),
+                        self.btn_actualizar_red,
+                        self.lbl_estado_red,
+                        self.inp_buscar_puesto,
+                    ]),
+                ),
+                # Lista puestos
+                ft.Container(
+                    expand=True,
+                    padding=ft.Padding.symmetric(horizontal=14),
+                    content=self.lista_puestos,
+                ),
+                # Botones inferiores
+                ft.Container(
+                    padding=ft.Padding.all(14),
+                    content=ft.Row([
+                        ft.Button(
+                            "QUITAR PUESTO FIJO",
+                            bgcolor="#A61414", color="white",
+                            expand=True,
+                            on_click=self._quitar_puesto,
+                        ),
+                        ft.OutlinedButton(
+                            "CANCELAR", expand=True,
+                            style=ft.ButtonStyle(color=VERDE_OSCURO,
+                                side=ft.BorderSide(1, VERDE_OSCURO)),
+                            on_click=lambda e: self.ir_a("activa"),
+                        ),
+                    ], spacing=8),
+                ),
+            ],
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  LOGICA DE REGISTRO
+    # ─────────────────────────────────────────────────────────────────────────
+    def _tomar_foto(self, e):
+        self._pick_imagen()
+
+    def _abrir_galeria(self, e):
+        self._pick_imagen()
+
+    def _pick_imagen(self):
+        def _worker():
+            try:
+                result = self.file_picker.pick_files(
+                    dialog_title="Seleccionar foto",
+                    file_type=ft.FilePickerFileType.IMAGE,
+                )
+                if result and len(result) > 0:
+                    self._ruta_foto = result[0].path or ""
+                    nombre = os.path.basename(self._ruta_foto) if self._ruta_foto else ""
+                    self.lbl_foto.value = f"OK: {nombre}" if nombre else "Foto seleccionada"
+                    self.lbl_foto.color = VERDE_MEDIO
+                else:
+                    self.lbl_foto.value = "Sin foto seleccionada"
+                    self.lbl_foto.color = ft.Colors.GREY
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+            except Exception as ex:
+                self.lbl_foto.value = f"Error: {ex}"
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _buscar_empleado(self, e):
+        credencial = self.inp_credencial.value.strip() if self.inp_credencial.value else ""
+        if not credencial:
+            self.snack("Escribe primero el número de credencial")
+            return
+        self.lbl_busqueda.value = "Buscando en la red..."
+        self.lbl_busqueda.color = ft.Colors.GREY
+        self.page.update()
+
+        self.buscar_empleado_red(
+            credencial,
+            callback_ok=self._reg_encontrado,
+            callback_error=self._reg_no_encontrado,
+        )
+
+    def _reg_encontrado(self, datos: dict):
+        self.inp_nombre.value    = datos.get("nombre", "")
+        self.inp_nss.value       = datos.get("nss", "")
+        self.inp_cuadrilla.value = datos.get("cuadrilla", "")
+        self._puesto_clave_reg   = datos.get("puesto_clave", "")
+        self._puesto_desc_reg    = datos.get("puesto_desc", "")
+        self.lbl_busqueda.value  = f"✓ Encontrado: {datos.get('nombre', '')}"
+        self.lbl_busqueda.color  = VERDE_MEDIO
+        try:
+            self.page.update()
+        except Exception:
+            pass
+        self.snack("Datos del empleado cargados")
+
+    def _reg_no_encontrado(self, msg: str):
+        self.lbl_busqueda.value = msg
+        self.lbl_busqueda.color = "#B33326"
+        try:
+            self.page.update()
+        except Exception:
+            pass
+        self.snack(msg)
+
+    def _guardar_registro(self, e):
+        nombre     = (self.inp_nombre.value or "").strip().upper()
+        nss        = (self.inp_nss.value or "").strip()
+        credencial = (self.inp_credencial.value or "").strip()
+        cuadrilla  = (self.inp_cuadrilla.value or "").strip()
+        hora_txt   = (self.inp_hora.value or "").strip()
 
         errores = []
         if not nombre:     errores.append("nombre")
         if len(nss) < 10:  errores.append("NSS")
         if not credencial: errores.append("credencial")
         if not cuadrilla:  errores.append("cuadrilla")
-        if not self.ruta_foto_seleccionada: errores.append("foto")
+        if not self._ruta_foto: errores.append("foto")
 
         hora_int = 7
-        if hora_entrada:
+        if hora_txt:
             try:
-                hora_int = int(hora_entrada.split(":")[0])
+                hora_int = int(hora_txt.split(":")[0])
             except Exception:
                 errores.append("hora HH:MM")
 
         if errores:
-            Snackbar(text=f"Falta: {', '.join(errores)}").open()
+            self.snack(f"Falta: {', '.join(errores)}")
             return
 
-        app = MDApp.get_running_app()
-        pa  = app.root.get_screen('activa')
-
+        # Formato nombre
         palabras = nombre.split()
         if len(palabras) >= 3:
             nombre_fmt = f"{palabras[0]} {palabras[1]}\n{' '.join(palabras[2:])}"
@@ -1088,12 +997,15 @@ class PantallaRegistro(Screen):
         else:
             nombre_fmt = nombre
 
-        pa.nombre_empleado = nombre_fmt
-        pa.nss             = nss
-        pa.num_credencial  = credencial
-        pa.num_cuadrilla   = cuadrilla
-        pa.ruta_foto       = self.ruta_foto_seleccionada
-        pa.fecha_ingreso   = datetime.date.today().strftime("%d/%m/%Y")
+        fecha_ingreso = datetime.date.today().strftime("%d/%m/%Y")
+
+        # Actualizar UI activa
+        self.lbl_nombre.value     = nombre_fmt
+        self.lbl_nss.value        = f"NSS: {nss}"
+        self.lbl_num_cred.value   = f"No. {credencial}"
+        self.lbl_cuadrilla.value  = f"Cuadrilla: {cuadrilla}"
+        self.lbl_ingreso.value    = f"Ingreso: {fecha_ingreso}"
+        self.img_foto.src         = self._ruta_foto
 
         datos = cargar_datos()
         datos.update({
@@ -1101,20 +1013,17 @@ class PantallaRegistro(Screen):
             "nss":                 nss,
             "credencial":          credencial,
             "cuadrilla":           cuadrilla,
-            "foto":                self.ruta_foto_seleccionada,
-            "fecha_ingreso":       pa.fecha_ingreso,
+            "foto":                self._ruta_foto,
+            "fecha_ingreso":       fecha_ingreso,
             "hora_entrada":        hora_int,
             "fecha_inicio_conteo": datetime.date.today().isoformat(),
             "ultima_asistencia":   datetime.datetime.now().isoformat(),
             "confirmaciones_hoy":  0,
         })
 
-        # Si la busqueda por red trajo un puesto para esta credencial,
-        # se configura como puesto fijo automaticamente (sin pasar por
-        # la pantalla de PIN de RH).
-        if self._puesto_clave_encontrado or self._puesto_desc_encontrado:
-            clave = self._puesto_clave_encontrado
-            desc  = self._puesto_desc_encontrado
+        if self._puesto_clave_reg or self._puesto_desc_reg:
+            clave = self._puesto_clave_reg
+            desc  = self._puesto_desc_reg
             desc_completa = f"{clave} - {desc}" if clave and desc else (desc or clave)
             datos["puesto_fijo_clave"] = clave
             datos["puesto_fijo_desc"]  = desc_completa
@@ -1122,453 +1031,300 @@ class PantallaRegistro(Screen):
 
         guardar_datos(datos)
 
-        app._confirmaciones_hoy = 0
-        app.iniciar_anuncio_wifi(credencial, cuadrilla, nombre_fmt)
-        app.iniciar_servidor_validacion(credencial, cuadrilla)
-        app.iniciar_gps()
-        Clock.schedule_once(lambda dt: app.cargar_qr(credencial), 0.5)
-        Clock.schedule_once(lambda dt: app.actualizar_badge_puesto(), 0.3)
-        app.root.current = 'activa'
-        Snackbar(text="Credencial generada").open()
+        self._confirmaciones_hoy = 0
+        self.iniciar_anuncio_wifi(credencial, cuadrilla, nombre_fmt)
+        self.iniciar_servidor_validacion(credencial, cuadrilla)
+        self._cargar_qr(credencial)
+        self.actualizar_badge_puesto()
+        self.ir_a("activa")
+        self.snack("Credencial generada")
 
-
-class PantallaActiva(Screen):
-    nombre_empleado       = StringProperty("")
-    fecha_ingreso         = StringProperty("")
-    nss                   = StringProperty("")
-    num_credencial        = StringProperty("")
-    num_cuadrilla         = StringProperty("")
-    texto_vigencia        = StringProperty("Sin faltas consecutivas")
-    ruta_foto             = StringProperty("")
-    color_icono_wifi      = ListProperty([0.96, 0.65, 0.14, 1])
-    texto_gps             = StringProperty("GPS: sin senal")
-    texto_estado_conexion = StringProperty("Buscando cuadrillero...")
-    color_estado          = ListProperty([0.6, 0.6, 0.6, 1])
-    texto_proximo_anuncio = StringProperty("Emitiendo cada 10s...")
-    texto_turno           = StringProperty("Sin confirmar — emitiendo cada 10s")
-    color_turno           = ListProperty([0.96, 0.65, 0.14, 1])
-    texto_puesto_fijo     = StringProperty("Sin puesto fijo configurado")
-    color_badge_puesto    = ListProperty([0.7, 0.7, 0.7, 1])
-    _dialog_cuadrilla     = None
-
-    def editar_cuadrilla_dia(self):
-        """
-        Cambia la cuadrilla del dia (para cuando reasignan al trabajador a
-        otro cuadrillero). Protegido con el PIN de RH: solo el apuntador o
-        RH deberian tener este codigo, no el trabajador libremente.
-        """
-        campo_pin = MDTextField(
-            hint_text="PIN de RH",
-            password=True,
-            line_color_focus=(0.18, 0.29, 0.12, 1),
+    # ─────────────────────────────────────────────────────────────────────────
+    #  LOGICA CUADRILLA DEL DIA
+    # ─────────────────────────────────────────────────────────────────────────
+    def _editar_cuadrilla_dia(self, e):
+        campo_pin = ft.TextField(
+            label="PIN de RH", password=True, can_reveal_password=True,
+            focused_border_color=VERDE_OSCURO, cursor_color=VERDE_OSCURO,
         )
-        campo_cuadrilla = MDTextField(
-            hint_text="Nueva cuadrilla",
-            input_filter="int",
-            line_color_focus=(0.18, 0.29, 0.12, 1),
+        campo_cuad = ft.TextField(
+            label="Nueva cuadrilla",
+            input_filter=ft.NumbersOnlyInputFilter(),
+            focused_border_color=VERDE_OSCURO, cursor_color=VERDE_OSCURO,
         )
-        contenedor = MDBoxLayout(
-            orientation="vertical", spacing="12dp",
-            size_hint_y=None, height="120dp"
-        )
-        contenedor.add_widget(campo_pin)
-        contenedor.add_widget(campo_cuadrilla)
 
-        def _cerrar(*_):
-            self._dialog_cuadrilla.dismiss()
-
-        def _guardar(*_):
-            if campo_pin.text.strip() != PIN_RH:
-                Snackbar(text="PIN incorrecto").open()
-                return
-            nueva = campo_cuadrilla.text.strip()
-            if not nueva:
-                Snackbar(text="Escribe el numero de cuadrilla").open()
-                return
-            datos = cargar_datos()
-            datos["cuadrilla_dia"]       = nueva
-            datos["cuadrilla_dia_fecha"] = datetime.date.today().isoformat()
-            guardar_datos(datos)
-            self.num_cuadrilla = nueva
-            self._dialog_cuadrilla.dismiss()
-            Snackbar(text=f"Cuadrilla del dia actualizada a {nueva}").open()
-
-        self._dialog_cuadrilla = MDDialog(
-            title="Cambiar cuadrilla de hoy (requiere PIN de RH)",
-            type="custom",
-            content_cls=contenedor,
-            buttons=[
-                MDFlatButton(text="CANCELAR", on_release=_cerrar),
-                MDRaisedButton(
-                    text="GUARDAR", md_bg_color=(0.18, 0.29, 0.12, 1),
-                    on_release=_guardar
+        dlg = ft.AlertDialog(
+            title=ft.Text("Cambiar cuadrilla de hoy\n(requiere PIN de RH)", size=15),
+            content=ft.Column([campo_pin, campo_cuad], spacing=10, tight=True),
+            actions=[
+                ft.TextButton("CANCELAR", on_click=lambda e: self.page.pop_dialog()),
+                ft.Button(
+                    "GUARDAR", bgcolor=VERDE_OSCURO, color="white",
+                    on_click=lambda e: self._guardar_cuadrilla_dia(
+                        dlg, campo_pin.value, campo_cuad.value
+                    ),
                 ),
             ],
         )
-        self._dialog_cuadrilla.open()
+        self.page.show_dialog(dlg)
 
-
-class PantallaPuestoFijo(Screen):
-    puesto_actual   = StringProperty("Sin configurar")
-    _pin_verificado = False
-
-    def on_enter(self):
-        self._pin_verificado = False
-        self.ids.input_pin_puesto.text = ""
-        self.ids.input_buscar_puesto.disabled = True
-        self.ids.btn_actualizar_red.disabled  = True
-        self.ids.label_estado_red_puesto.text = ""
-        self.ids.lista_puestos.clear_widgets()
-
-        datos = cargar_datos()
-        puesto = datos.get("puesto_fijo_desc", "Sin configurar")
-        self.puesto_actual = puesto
-
-    def verificar_pin(self):
-        pin = self.ids.input_pin_puesto.text.strip()
-        self.ids.input_pin_puesto.text = ""
+    def _guardar_cuadrilla_dia(self, dlg, pin, nueva):
+        pin   = (pin or "").strip()
+        nueva = (nueva or "").strip()
         if pin != PIN_RH:
-            Snackbar(text="PIN incorrecto").open()
+            self.snack("PIN incorrecto")
             return
-        self._pin_verificado = True
-        self.ids.input_buscar_puesto.disabled = False
-        self.ids.btn_actualizar_red.disabled  = False
-        self.filtrar_puestos("")
-        Snackbar(text="PIN correcto — selecciona el puesto").open()
-
-    def actualizar_puesto_desde_red(self):
-        if not self._pin_verificado:
-            Snackbar(text="Verifica el PIN primero").open()
+        if not nueva:
+            self.snack("Escribe el número de cuadrilla")
             return
-        datos      = cargar_datos()
-        credencial = datos.get("credencial", "")
-        if not credencial:
-            Snackbar(text="No hay credencial registrada").open()
-            return
-
-        self.ids.label_estado_red_puesto.text       = "Buscando en la red..."
-        self.ids.label_estado_red_puesto.text_color = (0.5, 0.5, 0.5, 1)
-
-        app = MDApp.get_running_app()
-        app.buscar_empleado_red(
-            credencial,
-            callback_ok=self._al_actualizar_puesto_ok,
-            callback_error=self._al_actualizar_puesto_error,
-        )
-
-    def _al_actualizar_puesto_ok(self, datos_emp: dict):
-        clave = datos_emp.get("puesto_clave", "")
-        desc  = datos_emp.get("puesto_desc", "")
-
-        if not clave and not desc:
-            self.ids.label_estado_red_puesto.text       = "RH no tiene puesto fijo para esta credencial"
-            self.ids.label_estado_red_puesto.text_color = (0.7, 0.2, 0.15, 1)
-            Snackbar(text="Sin puesto fijo en RH para esta credencial").open()
-            return
-
-        desc_completa = f"{clave} - {desc}" if clave and desc else (desc or clave)
-
         datos = cargar_datos()
-        datos["puesto_fijo_clave"] = clave
-        datos["puesto_fijo_desc"]  = desc_completa
-        datos["es_puesto_fijo"]    = True
+        datos["cuadrilla_dia"]       = nueva
+        datos["cuadrilla_dia_fecha"] = datetime.date.today().isoformat()
         guardar_datos(datos)
+        self.lbl_cuadrilla.value = f"Cuadrilla: {nueva}"
+        self.page.pop_dialog()
+        self.page.update()
+        self.snack(f"Cuadrilla del día actualizada a {nueva}")
 
-        self.puesto_actual = desc_completa
-        self.ids.label_estado_red_puesto.text       = "✓ Puesto actualizado desde RH"
-        self.ids.label_estado_red_puesto.text_color = (0.18, 0.42, 0.18, 1)
-
-        app = MDApp.get_running_app()
-        app.actualizar_badge_puesto()
-        Snackbar(text=f"Puesto actualizado: {desc_completa}").open()
-
-    def _al_actualizar_puesto_error(self, mensaje: str):
-        self.ids.label_estado_red_puesto.text       = mensaje
-        self.ids.label_estado_red_puesto.text_color = (0.7, 0.2, 0.15, 1)
-        Snackbar(text=mensaje).open()
-
-    def filtrar_puestos(self, texto):
-        if not self._pin_verificado:
+    # ─────────────────────────────────────────────────────────────────────────
+    #  LOGICA QR
+    # ─────────────────────────────────────────────────────────────────────────
+    def _cargar_qr(self, credencial: str):
+        if not credencial:
             return
-        self.ids.lista_puestos.clear_widgets()
-        txt = texto.strip().upper()
+        b64 = generar_qr_base64(credencial)
+        if b64:
+            self.img_qr.src        = f"data:image/png;base64,{b64}"
+            self.img_qr.visible    = True
+            self.lbl_qr_error.value = ""
+        else:
+            self.img_qr.visible     = False
+            self.lbl_qr_error.value = "QR no disponible en este dispositivo"
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  BADGE PUESTO FIJO
+    # ─────────────────────────────────────────────────────────────────────────
+    def actualizar_badge_puesto(self):
+        datos   = cargar_datos()
+        es_fijo = datos.get("es_puesto_fijo", False)
+        desc    = datos.get("puesto_fijo_desc", "")
+        if es_fijo and desc:
+            self.lbl_puesto_badge.value    = f"PUESTO FIJO: {desc}"
+            self.cont_puesto_badge.bgcolor = "#2E4A8C"
+        else:
+            self.lbl_puesto_badge.value    = "Sin puesto fijo — jornalero"
+            self.cont_puesto_badge.bgcolor = ft.Colors.GREY
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  LOGICA PUESTO FIJO
+    # ─────────────────────────────────────────────────────────────────────────
+    def _on_enter_puesto_fijo(self):
+        self._pin_puesto_ok = False
+        self.inp_pin_puesto.value = ""
+        self.inp_buscar_puesto.disabled = True
+        self.inp_buscar_puesto.value = ""
+        self.btn_actualizar_red.disabled = True
+        self.lbl_estado_red.value = ""
+        self.lista_puestos.controls.clear()
+        datos = cargar_datos()
+        self.lbl_puesto_actual.value = datos.get("puesto_fijo_desc", "Sin configurar")
+
+    def _verificar_pin_puesto(self, e):
+        pin = (self.inp_pin_puesto.value or "").strip()
+        self.inp_pin_puesto.value = ""
+        if pin != PIN_RH:
+            self.snack("PIN incorrecto")
+            self.page.update()
+            return
+        self._pin_puesto_ok = True
+        self.inp_buscar_puesto.disabled = False
+        self.btn_actualizar_red.disabled = False
+        self._poblar_lista_puestos("")
+        self.page.update()
+        self.snack("PIN correcto — selecciona el puesto")
+
+    def _filtrar_puestos(self, e):
+        if not self._pin_puesto_ok:
+            return
+        self._poblar_lista_puestos((e.data or "").strip().upper())
+        self.page.update()
+
+    def _poblar_lista_puestos(self, filtro: str):
+        self.lista_puestos.controls.clear()
         resultados = [
             (c, d) for c, d in ACTIVIDADES_FIJAS
-            if txt in d.upper() or txt in c
-        ] if txt else ACTIVIDADES_FIJAS
+            if filtro in d.upper() or filtro in c
+        ] if filtro else ACTIVIDADES_FIJAS
 
-        from kivymd.uix.list import OneLineListItem
         for clave, desc in resultados:
-            item = OneLineListItem(
-                text=f"{clave} - {desc}",
-                on_release=lambda x, c=clave, d=desc: self._seleccionar_puesto(c, d)
+            self.lista_puestos.controls.append(
+                ft.ListTile(
+                    title=ft.Text(f"{clave} - {desc}", size=13),
+                    dense=True,
+                    on_click=lambda e, c=clave, d=desc: self._seleccionar_puesto(c, d),
+                )
             )
-            self.ids.lista_puestos.add_widget(item)
 
     def _seleccionar_puesto(self, clave, desc):
-        if not self._pin_verificado:
+        if not self._pin_puesto_ok:
             return
         datos = cargar_datos()
         datos["puesto_fijo_clave"] = clave
         datos["puesto_fijo_desc"]  = f"{clave} - {desc}"
         datos["es_puesto_fijo"]    = True
         guardar_datos(datos)
+        self.lbl_puesto_actual.value = f"{clave} - {desc}"
+        self.actualizar_badge_puesto()
+        self.snack(f"Puesto configurado: {desc}")
 
-        self.puesto_actual = f"{clave} - {desc}"
-        app = MDApp.get_running_app()
-        app.actualizar_badge_puesto()
+        def _volver():
+            time.sleep(1.0)
+            self.ir_a("activa")
+        threading.Thread(target=_volver, daemon=True).start()
 
-        Snackbar(text=f"Puesto configurado: {desc}").open()
-        Clock.schedule_once(lambda dt: setattr(
-            app.root, 'current', 'activa'
-        ), 1.0)
-
-    def quitar_puesto(self):
-        if not self._pin_verificado:
-            Snackbar(text="Verifica el PIN primero").open()
+    def _quitar_puesto(self, e):
+        if not self._pin_puesto_ok:
+            self.snack("Verifica el PIN primero")
             return
         datos = cargar_datos()
         datos["puesto_fijo_clave"] = ""
         datos["puesto_fijo_desc"]  = ""
         datos["es_puesto_fijo"]    = False
         guardar_datos(datos)
-        self.puesto_actual = "Sin configurar"
-        app = MDApp.get_running_app()
-        app.actualizar_badge_puesto()
-        Snackbar(text="Puesto fijo eliminado").open()
-        app.root.current = 'activa'
+        self.lbl_puesto_actual.value = "Sin configurar"
+        self.actualizar_badge_puesto()
+        self.snack("Puesto fijo eliminado")
+        self.ir_a("activa")
 
-
-class PantallaInactiva(Screen):
-    PIN_RH             = "RH2024"
-    motivo_bloqueo     = StringProperty("3 faltas consecutivas registradas.")
-    texto_faltas       = StringProperty("Presentate a Recursos Humanos")
-    _tipo_seleccionado = "falta"
-
-    def seleccionar_tipo(self, tipo: str):
-        self._tipo_seleccionado = tipo
-        colores = {
-            "falta":       [0.50, 0.15, 0.15, 1],
-            "incapacidad": [0.18, 0.38, 0.18, 1],
-            "vacaciones":  [0.18, 0.29, 0.45, 1],
-        }
-        apagado = [0.22, 0.22, 0.22, 1]
-        self.ids.btn_tipo_falta.md_bg_color       = apagado
-        self.ids.btn_tipo_incapacidad.md_bg_color = apagado
-        self.ids.btn_tipo_vacaciones.md_bg_color  = apagado
-        self.ids[{
-            "falta": "btn_tipo_falta",
-            "incapacidad": "btn_tipo_incapacidad",
-            "vacaciones": "btn_tipo_vacaciones"
-        }[tipo]].md_bg_color = colores[tipo]
-        Snackbar(text=f"Tipo: {tipo.upper()}").open()
-
-    def intentar_reactivacion(self):
-        pin = self.ids.pin_input.text.strip()
-        self.ids.pin_input.text = ""
-        if pin != self.PIN_RH:
-            Snackbar(text="PIN incorrecto.").open()
+    def _actualizar_puesto_red(self, e):
+        if not self._pin_puesto_ok:
+            self.snack("Verifica el PIN primero")
             return
-        tipo  = self._tipo_seleccionado
-        app   = MDApp.get_running_app()
+        datos      = cargar_datos()
+        credencial = datos.get("credencial", "")
+        if not credencial:
+            self.snack("No hay credencial registrada")
+            return
+        self.lbl_estado_red.value = "Buscando en la red..."
+        self.lbl_estado_red.color = ft.Colors.GREY
+        self.page.update()
+
+        self.buscar_empleado_red(
+            credencial,
+            callback_ok=self._puesto_red_ok,
+            callback_error=self._puesto_red_error,
+        )
+
+    def _puesto_red_ok(self, datos_emp: dict):
+        clave = datos_emp.get("puesto_clave", "")
+        desc  = datos_emp.get("puesto_desc", "")
+        if not clave and not desc:
+            self.lbl_estado_red.value = "RH no tiene puesto fijo para esta credencial"
+            self.lbl_estado_red.color = "#B33326"
+            try:
+                self.page.update()
+            except Exception:
+                pass
+            self.snack("Sin puesto fijo en RH para esta credencial")
+            return
+        desc_completa = f"{clave} - {desc}" if clave and desc else (desc or clave)
         datos = cargar_datos()
+        datos["puesto_fijo_clave"] = clave
+        datos["puesto_fijo_desc"]  = desc_completa
+        datos["es_puesto_fijo"]    = True
+        guardar_datos(datos)
+        self.lbl_puesto_actual.value = desc_completa
+        self.lbl_estado_red.value    = "✓ Puesto actualizado desde RH"
+        self.lbl_estado_red.color    = VERDE_MEDIO
+        self.actualizar_badge_puesto()
+        try:
+            self.page.update()
+        except Exception:
+            pass
+        self.snack(f"Puesto actualizado: {desc_completa}")
+
+    def _puesto_red_error(self, msg: str):
+        self.lbl_estado_red.value = msg
+        self.lbl_estado_red.color = "#B33326"
+        try:
+            self.page.update()
+        except Exception:
+            pass
+        self.snack(msg)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  LOGICA DE DESBLOQUEO (pantalla inactiva)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _sel_tipo(self, tipo: str):
+        self._tipo_bloqueo = tipo
+        apagado = "#383838"
+        colores = {
+            "falta":       "#801326",
+            "incapacidad": VERDE_MEDIO,
+            "vacaciones":  "#2E4A73",
+        }
+        self.btn_falta.bgcolor       = apagado
+        self.btn_incapacidad.bgcolor  = apagado
+        self.btn_vacaciones.bgcolor   = apagado
+        {
+            "falta":       self.btn_falta,
+            "incapacidad": self.btn_incapacidad,
+            "vacaciones":  self.btn_vacaciones,
+        }[tipo].bgcolor = colores[tipo]
+        self.page.update()
+        self.snack(f"Tipo: {tipo.upper()}")
+
+    def _intentar_reactivacion(self, e):
+        pin = (self.inp_pin_desbloqueo.value or "").strip()
+        self.inp_pin_desbloqueo.value = ""
+        if pin != PIN_RH:
+            self.snack("PIN incorrecto.")
+            self.page.update()
+            return
+
+        tipo      = self._tipo_bloqueo
+        datos     = cargar_datos()
         historial = datos.get("historial", [])
-        mes_hoy = mes_actual_str()
-        for i, e in enumerate(historial):
-            if e.get("mes") == mes_hoy and e.get("estatus") == "falta":
+        mes_hoy   = mes_actual_str()
+
+        for i, entry in enumerate(historial):
+            if entry.get("mes") == mes_hoy and entry.get("estatus") == "falta":
                 historial[i]["estatus"]       = tipo
                 historial[i]["autorizado_rh"] = True
+
         historial = agregar_dia_historial(historial, estatus="presente", turno="matutino")
         datos["historial"]           = historial
         datos["fecha_inicio_conteo"] = datetime.date.today().isoformat()
         datos["faltas_consecutivas"] = 0
         datos["confirmaciones_hoy"]  = 0
         guardar_datos(datos)
+
         faltas = calcular_faltas_consecutivas(historial)
-        pa = app.root.get_screen('activa')
-        pa.texto_vigencia = app._texto_vigencia(faltas)
-        app._confirmaciones_hoy = 0
-        app._anuncio_activo = False
-        app.iniciar_anuncio_wifi(pa.num_credencial, pa.num_cuadrilla, pa.nombre_empleado)
-        app.iniciar_servidor_validacion(pa.num_credencial, pa.num_cuadrilla)
-        Clock.schedule_once(lambda dt: app.cargar_qr(pa.num_credencial), 0.3)
-        app.root.current = 'activa'
-        Snackbar(text="Credencial desbloqueada.").open()
+        self._confirmaciones_hoy = 0
+        self._actualizar_texto_turno()
+        self.lbl_vigencia.value = self._texto_vigencia(faltas)
 
+        cred = datos.get("credencial", "")
+        cuad = datos.get("cuadrilla", "")
+        nomb = datos.get("nombre", "")
+        self._anuncio_activo = False
+        self.iniciar_anuncio_wifi(cred, cuad, nomb)
+        self.iniciar_servidor_validacion(cred, cuad)
+        self._cargar_qr(cred)
+        self.ir_a("activa")
+        self.snack("Credencial desbloqueada.")
 
-# =============================================================================
-#  APLICACION PRINCIPAL
-# =============================================================================
-class CredencialAgriCactusApp(MDApp):
-    estado_parpadeo     = BooleanProperty(False)
-    _anuncio_activo     = False
-    _validacion_activa  = False
-    _autovalidacion_activa = False
-    _lat                = 0.0
-    _lon                = 0.0
-    _proximo_anuncio    = None
-    _confirmaciones_hoy = 0
-
-    def build(self):
-        self.theme_cls.theme_style     = "Light"
-        self.theme_cls.primary_palette = "Green"
-        controlador = Builder.load_string(KV)
-        self._solicitar_permisos()
-        Clock.schedule_interval(self.verificar_vigencia, 30)
-        Clock.schedule_interval(self.parpadear_wifi, 1)
-        Clock.schedule_interval(self._actualizar_ui_anuncio, 15)
-        Clock.schedule_once(self._restaurar_sesion, 0.5)
-        return controlador
-
-    # ── Solicitud activa de permisos ──────────────────────────────────────────
-    def _solicitar_permisos(self):
-        if platform != 'android':
-            return
-        try:
-            from android.permissions import request_permissions, Permission
-            permisos = [
-                Permission.ACCESS_FINE_LOCATION,
-                Permission.ACCESS_COARSE_LOCATION,
-                Permission.ACCESS_WIFI_STATE,
-                Permission.CHANGE_WIFI_MULTICAST_STATE,
-                Permission.CAMERA,
-                Permission.WRITE_EXTERNAL_STORAGE,
-                Permission.READ_EXTERNAL_STORAGE,
-            ]
-            try:
-                permisos.append(Permission.NEARBY_WIFI_DEVICES)  # Android 13+
-            except AttributeError:
-                pass
-            request_permissions(permisos, self._al_resultado_permisos)
-        except Exception as e:
-            print(f"[PERMISOS] Error solicitando permisos: {e}")
-
-    def _al_resultado_permisos(self, permisos, resultados):
-        print(f"[PERMISOS] Resultado: {dict(zip(permisos, resultados))}")
-
-    def _restaurar_sesion(self, dt):
-        datos = cargar_datos()
-        if not datos:
-            return
-        pa = self.root.get_screen('activa')
-        pa.nombre_empleado = datos.get("nombre", "")
-        pa.nss             = datos.get("nss", "")
-        pa.num_credencial  = datos.get("credencial", "")
-        pa.num_cuadrilla   = obtener_cuadrilla_efectiva(datos)
-        pa.ruta_foto       = datos.get("foto", "")
-        pa.fecha_ingreso   = datos.get("fecha_ingreso", "")
-
-        conf_guardadas = datos.get("confirmaciones_hoy", 0)
-        ultima = datos.get("ultima_asistencia", "")
-        if ultima:
-            try:
-                fecha_ultima = datetime.datetime.fromisoformat(ultima).date()
-                self._confirmaciones_hoy = (
-                    conf_guardadas if fecha_ultima == datetime.date.today() else 0
-                )
-            except Exception:
-                self._confirmaciones_hoy = 0
-
-        historial = datos.get("historial", [])
-        gracia    = en_periodo_gracia(datos)
-        faltas    = 0 if gracia else calcular_faltas_consecutivas(historial)
-        pa.texto_vigencia = self._texto_vigencia(faltas)
-        self._actualizar_texto_turno(pa)
-        self.actualizar_badge_puesto()
-
-        if faltas >= MAX_FALTAS:
-            pi = self.root.get_screen('inactiva')
-            pi.motivo_bloqueo = f"{faltas} faltas.\nPresentate a RH."
-            pi.texto_faltas   = f"Faltas del mes: {contar_faltas_mes(historial)}"
-            self.root.current = 'inactiva'
-        else:
-            cred = datos.get("credencial", "")
-            cuad = datos.get("cuadrilla", "")
-            nomb = datos.get("nombre", "")
-            self.iniciar_anuncio_wifi(cred, cuad, nomb)
-            self.iniciar_servidor_validacion(cred, cuad)
-            self.iniciar_autovalidacion_apuntador(cred, cuad, nomb)
-            self.iniciar_gps()
-            Clock.schedule_once(lambda dt: self.cargar_qr(cred), 1.0)
-            self.root.current = 'activa'
-
-    def actualizar_badge_puesto(self):
-        datos  = cargar_datos()
-        es_fijo = datos.get("es_puesto_fijo", False)
-        desc    = datos.get("puesto_fijo_desc", "")
-        pa      = self.root.get_screen('activa')
-        if es_fijo and desc:
-            pa.texto_puesto_fijo  = f"PUESTO FIJO: {desc}"
-            pa.color_badge_puesto = [0.18, 0.29, 0.55, 1]
-        else:
-            pa.texto_puesto_fijo  = "Sin puesto fijo — jornalero"
-            pa.color_badge_puesto = [0.6, 0.6, 0.6, 1]
-
-    def _actualizar_texto_turno(self, pa=None):
-        if pa is None:
-            pa = self.root.get_screen('activa')
-        if self._confirmaciones_hoy == 0:
-            pa.texto_turno = "Sin confirmar — emitiendo cada 10s"
-            pa.color_turno = [0.96, 0.65, 0.14, 1]
-        elif self._confirmaciones_hoy == 1:
-            pa.texto_turno = "✓ Turno MATUTINO confirmado"
-            pa.color_turno = [0.18, 0.42, 0.18, 1]
-        else:
-            pa.texto_turno = "✓✓ Turno VESPERTINO confirmado"
-            pa.color_turno = [0.10, 0.30, 0.55, 1]
-
-    def _actualizar_ui_anuncio(self, dt):
-        if not self.root or self.root.current != 'activa':
-            return
-        pa = self.root.get_screen('activa')
-        if self._confirmaciones_hoy == 0:
-            pa.texto_proximo_anuncio = "Emitiendo cada 10s"
-        elif self._proximo_anuncio:
-            mins = max(0, int((self._proximo_anuncio - time.time()) / 60))
-            pa.texto_proximo_anuncio = f"Proximo anuncio en: {mins} min"
-
-    def cargar_qr(self, credencial: str):
-        if not credencial:
-            return
-        def _gen(dt):
-            pantalla = self.root.get_screen('activa')
-            tex = generar_qr_texture(credencial)
-            if tex:
-                pantalla.ids.img_qr.texture = tex
-                pantalla.ids.label_qr_error.text = ""
-            else:
-                pantalla.ids.img_qr.texture = None
-                pantalla.ids.label_qr_error.text = "QR no disponible en este dispositivo"
-        Clock.schedule_once(_gen, 0)
-
-    def iniciar_gps(self):
-        if not GPS_DISPONIBLE:
-            return
-        try:
-            gps.configure(
-                on_location=self._on_gps_location,
-                on_status=self._on_gps_status
-            )
-            gps.start(minTime=60000, minDistance=50)
-        except Exception as e:
-            print(f"[GPS] Error: {e}")
-
-    def _on_gps_location(self, **kwargs):
-        self._lat = kwargs.get('lat', 0.0)
-        self._lon = kwargs.get('lon', 0.0)
-        texto = f"GPS: {self._lat:.4f}, {self._lon:.4f}"
-        def _act(dt):
-            self.root.get_screen('activa').texto_gps = texto
-            datos = cargar_datos()
-            datos["lat"] = self._lat
-            datos["lon"] = self._lon
-            guardar_datos(datos)
-        Clock.schedule_once(_act, 0)
-
-    def _on_gps_status(self, stype, status):
-        print(f"[GPS] {stype}: {status}")
-
-    # ── Anuncio WiFi adaptativo ───────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    #  RED WIFI  (idéntico al original)
+    # ─────────────────────────────────────────────────────────────────────────
     def iniciar_anuncio_wifi(self, credencial, cuadrilla, nombre):
         if self._anuncio_activo:
             return
@@ -1598,7 +1354,6 @@ class CredencialAgriCactusApp(MDApp):
             puesto_desc   = datos.get("puesto_fijo_desc", "").replace(':', '-')
             nombre_limpio = str(nombre).replace(':', ' ').replace('\n', ' ')
             tipo_trabajador = "FIJO" if es_fijo else "JORNALERO"
-
             mensaje = (
                 f"PRESENTE:{credencial}:{cuadrilla_actual}:{nombre_limpio}"
                 f":{self._lat:.6f}:{self._lon:.6f}"
@@ -1614,15 +1369,72 @@ class CredencialAgriCactusApp(MDApp):
     def detener_anuncio(self):
         self._anuncio_activo = False
 
-    # ── Consulta de datos de empleado (registro -> laptop servidor) ───────────
+    def iniciar_servidor_validacion(self, credencial, cuadrilla):
+        if self._validacion_activa:
+            return
+        self._validacion_activa = True
+
+        def _escuchar():
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind(('', PUERTO_VALIDACION))
+                    sock.settimeout(2.0)
+                    while self._validacion_activa:
+                        try:
+                            datos_raw, addr = sock.recvfrom(1024)
+                            msg    = datos_raw.decode('utf-8').strip()
+                            partes = msg.split(':')
+                            if (len(partes) >= 3
+                                    and partes[0] == 'VALIDAR'
+                                    and partes[1] == str(credencial)):
+                                turno = partes[4] if len(partes) > 4 else "matutino"
+                                sock.sendto(f"OK:{credencial}".encode(), addr)
+                                self._registrar_asistencia(turno)
+                        except socket.timeout:
+                            continue
+                        except Exception as e:
+                            print(f"[WIFI] Error: {e}")
+            except Exception as e:
+                print(f"[WIFI] Error servidor: {e}")
+            finally:
+                self._validacion_activa = False
+
+        threading.Thread(target=_escuchar, daemon=True).start()
+
+    def iniciar_autovalidacion_apuntador(self, credencial, cuadrilla, nombre):
+        if self._autovalidacion_activa:
+            return
+        self._autovalidacion_activa = True
+
+        def _escuchar():
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind(('', PUERTO_APUNTADOR))
+                    sock.settimeout(2.0)
+                    while self._autovalidacion_activa:
+                        try:
+                            datos_raw, addr = sock.recvfrom(1024)
+                            msg    = datos_raw.decode('utf-8').strip()
+                            partes = msg.split(':')
+                            if (len(partes) >= 2
+                                    and partes[0] == 'SCAN_FIJO'
+                                    and partes[1] == str(credencial)):
+                                sock.sendto(f"OK_FIJO:{credencial}".encode(), addr)
+                                self._registrar_asistencia("matutino")
+                        except socket.timeout:
+                            continue
+                        except Exception as e:
+                            print(f"[WIFI] Error autovalidacion: {e}")
+            except Exception as e:
+                print(f"[WIFI] Error autovalidacion servidor: {e}")
+            finally:
+                self._autovalidacion_activa = False
+
+        threading.Thread(target=_escuchar, daemon=True).start()
+
     def buscar_empleado_red(self, credencial, callback_ok, callback_error):
-        """
-        Busca los datos de un empleado por credencial en el servidor local
-        (laptop en la misma red WiFi, ver empleados_server.py).
-        No requiere internet, solo estar conectado al mismo WiFi/hotspot.
-        callback_ok(dict) se llama con los datos si se encuentra.
-        callback_error(str) se llama con un mensaje si falla o no responde.
-        """
         credencial = str(credencial).strip()
 
         def _worker():
@@ -1640,7 +1452,6 @@ class CredencialAgriCactusApp(MDApp):
                             partes = msg.split('|')
 
                             if partes[0] == 'EMP_OK' and len(partes) >= 2 and partes[1] == credencial:
-                                # EMP_OK|credencial|nombre|nss|cuadrilla|puesto_clave|puesto_desc
                                 resultado = {
                                     "nombre":       partes[2] if len(partes) > 2 else "",
                                     "nss":          partes[3] if len(partes) > 3 else "",
@@ -1648,104 +1459,29 @@ class CredencialAgriCactusApp(MDApp):
                                     "puesto_clave": partes[5] if len(partes) > 5 else "",
                                     "puesto_desc":  partes[6] if len(partes) > 6 else "",
                                 }
-                                Clock.schedule_once(lambda dt: callback_ok(resultado), 0)
+                                callback_ok(resultado)
                                 return
 
                             if partes[0] == 'EMP_NOTFOUND' and len(partes) >= 2 and partes[1] == credencial:
-                                Clock.schedule_once(
-                                    lambda dt: callback_error(
-                                        f"No existe ningun empleado con credencial {credencial}"
-                                    ), 0
+                                callback_error(
+                                    f"No existe ningún empleado con credencial {credencial}"
                                 )
                                 return
                         except socket.timeout:
                             continue
 
-                    Clock.schedule_once(
-                        lambda dt: callback_error(
-                            "Sin respuesta del servidor. Verifica que la laptop "
-                            "este encendida y conectada al mismo WiFi."
-                        ), 0
+                    callback_error(
+                        "Sin respuesta del servidor. Verifica que la laptop "
+                        "esté encendida y conectada al mismo WiFi."
                     )
             except Exception as e:
-                Clock.schedule_once(lambda dt, err=str(e): callback_error(f"Error de red: {err}"), 0)
+                callback_error(f"Error de red: {e}")
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    # ── Servidor validacion (cuadrillero -> trabajador) ───────────────────────
-    def iniciar_servidor_validacion(self, credencial, cuadrilla):
-        if self._validacion_activa:
-            return
-        self._validacion_activa = True
-
-        def _escuchar():
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    sock.bind(('', PUERTO_VALIDACION))
-                    sock.settimeout(2.0)
-                    while self._validacion_activa:
-                        try:
-                            datos_raw, addr = sock.recvfrom(1024)
-                            msg    = datos_raw.decode('utf-8').strip()
-                            partes = msg.split(':')
-                            if (len(partes) >= 3 and
-                                    partes[0] == 'VALIDAR' and
-                                    partes[1] == str(credencial)):
-                                turno = partes[4] if len(partes) > 4 else "matutino"
-                                sock.sendto(f"OK:{credencial}".encode(), addr)
-                                Clock.schedule_once(
-                                    lambda dt, t=turno: self._registrar_asistencia(t), 0
-                                )
-                        except socket.timeout:
-                            continue
-                        except Exception as e:
-                            print(f"[WIFI] Error: {e}")
-            except Exception as e:
-                print(f"[WIFI] Error servidor: {e}")
-            finally:
-                self._validacion_activa = False
-
-        threading.Thread(target=_escuchar, daemon=True).start()
-
-    # ── Auto-validacion para puesto fijo (apuntador -> trabajador) ────────────
-    def iniciar_autovalidacion_apuntador(self, credencial, cuadrilla, nombre):
-        if self._autovalidacion_activa:
-            return
-        self._autovalidacion_activa = True
-
-        def _escuchar():
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    sock.bind(('', PUERTO_APUNTADOR))
-                    sock.settimeout(2.0)
-                    while self._autovalidacion_activa:
-                        try:
-                            datos_raw, addr = sock.recvfrom(1024)
-                            msg    = datos_raw.decode('utf-8').strip()
-                            partes = msg.split(':')
-                            # Formato: SCAN_FIJO:<credencial>
-                            if (len(partes) >= 2 and
-                                    partes[0] == 'SCAN_FIJO' and
-                                    partes[1] == str(credencial)):
-                                sock.sendto(
-                                    f"OK_FIJO:{credencial}".encode(), addr
-                                )
-                                Clock.schedule_once(
-                                    lambda dt: self._registrar_asistencia("matutino"), 0
-                                )
-                        except socket.timeout:
-                            continue
-                        except Exception as e:
-                            print(f"[WIFI] Error autovalidacion: {e}")
-            except Exception as e:
-                print(f"[WIFI] Error autovalidacion servidor: {e}")
-            finally:
-                self._autovalidacion_activa = False
-
-        threading.Thread(target=_escuchar, daemon=True).start()
-
+    # ─────────────────────────────────────────────────────────────────────────
+    #  ASISTENCIA
+    # ─────────────────────────────────────────────────────────────────────────
     def _registrar_asistencia(self, turno: str = "matutino"):
         ahora     = datetime.datetime.now()
         datos     = cargar_datos()
@@ -1762,16 +1498,20 @@ class CredencialAgriCactusApp(MDApp):
         datos["confirmaciones_hoy"]  = self._confirmaciones_hoy
         guardar_datos(datos)
 
-        pa        = self.root.get_screen('activa')
         turno_txt = "MATUTINO" if turno == "matutino" else "VESPERTINO"
-        pa.texto_estado_conexion = f"✓ Turno {turno_txt}: {ahora.strftime('%H:%M')}"
-        pa.color_estado          = [0.18, 0.42, 0.18, 1]
-        pa.texto_vigencia        = self._texto_vigencia(faltas)
-        self._actualizar_texto_turno(pa)
+        self.lbl_estado_wifi.value = f"✓ Turno {turno_txt}: {ahora.strftime('%H:%M')}"
+        self.lbl_estado_wifi.color = VERDE_MEDIO
+        self.lbl_vigencia.value    = self._texto_vigencia(faltas)
+        self._actualizar_texto_turno()
 
-        if self.root.current == 'inactiva' and faltas < MAX_FALTAS:
-            self.root.current = 'activa'
-        Snackbar(text=f"✓ Turno {turno_txt}: {ahora.strftime('%H:%M')}").open()
+        if self.pantalla_actual == "inactiva" and faltas < MAX_FALTAS:
+            self.ir_a("activa")
+
+        try:
+            self.page.update()
+        except Exception:
+            pass
+        self.snack(f"✓ Turno {turno_txt}: {ahora.strftime('%H:%M')}")
 
     def _texto_vigencia(self, faltas: int) -> str:
         if faltas == 0:
@@ -1780,25 +1520,44 @@ class CredencialAgriCactusApp(MDApp):
             return "⚠ 1 falta mas = bloqueo"
         return f"Faltas: {faltas}/{MAX_FALTAS}"
 
-    def parpadear_wifi(self, dt):
-        if self.root and self.root.current == 'activa':
-            pa = self.root.get_screen('activa')
-            self.estado_parpadeo = not self.estado_parpadeo
-            pa.color_icono_wifi = (
-                [0.18, 0.29, 0.12, 1] if self.estado_parpadeo
-                else [0.96, 0.65, 0.14, 0.4]
-            )
+    def _actualizar_texto_turno(self):
+        if self._confirmaciones_hoy == 0:
+            self.lbl_turno.value  = "Sin confirmar — emitiendo cada 10s"
+            self.cont_turno.bgcolor = DORADO
+        elif self._confirmaciones_hoy == 1:
+            self.lbl_turno.value  = "✓ Turno MATUTINO confirmado"
+            self.cont_turno.bgcolor = VERDE_MEDIO
+        else:
+            self.lbl_turno.value  = "✓✓ Turno VESPERTINO confirmado"
+            self.cont_turno.bgcolor = "#1A4D8C"
 
-    def verificar_vigencia(self, dt):
+    # ─────────────────────────────────────────────────────────────────────────
+    #  TAREAS PERIODICAS
+    # ─────────────────────────────────────────────────────────────────────────
+    def _iniciar_tareas(self):
+        threading.Thread(target=self._loop_vigencia, daemon=True).start()
+        threading.Thread(target=self._loop_parpadeo, daemon=True).start()
+        threading.Thread(target=self._loop_anuncio_ui, daemon=True).start()
+
+    def _loop_vigencia(self):
+        while self._running:
+            time.sleep(30)
+            try:
+                self._verificar_vigencia()
+            except Exception as e:
+                print(f"[VIGENCIA] Error: {e}")
+
+    def _verificar_vigencia(self):
         datos     = cargar_datos()
         historial = datos.get("historial", [])
         hoy       = datetime.date.today()
         ahora     = datetime.datetime.now()
         gracia    = en_periodo_gracia(datos)
+
         if not gracia:
             hora_entrada = datos.get("hora_entrada", 7)
             hora_limite  = hora_entrada + TOLERANCIA_HORAS
-            dias_ok      = {
+            dias_ok = {
                 e.get("fecha") for e in historial
                 if e.get("turno") == "matutino"
             }
@@ -1809,24 +1568,132 @@ class CredencialAgriCactusApp(MDApp):
                     )
                     datos["historial"] = historial
                     guardar_datos(datos)
+
         faltas = 0 if gracia else calcular_faltas_consecutivas(historial)
+
         if faltas >= MAX_FALTAS:
             self.detener_anuncio()
-            if self.root.current != 'inactiva':
-                pi = self.root.get_screen('inactiva')
-                pi.motivo_bloqueo = f"{faltas} faltas.\nPresentate a RH."
-                pi.texto_faltas   = f"Faltas: {contar_faltas_mes(historial)}"
-                self.root.current = 'inactiva'
+            if self.pantalla_actual != "inactiva":
+                self.lbl_motivo.value      = f"{faltas} faltas.\nPreséntate a RH."
+                self.lbl_faltas_inact.value = f"Faltas: {contar_faltas_mes(historial)}"
+                self.ir_a("inactiva")
         else:
-            if self.root.current == 'activa':
-                self.root.get_screen('activa').texto_vigencia = \
-                    self._texto_vigencia(faltas)
+            if self.pantalla_actual == "activa":
+                self.lbl_vigencia.value = self._texto_vigencia(faltas)
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
 
-    def on_stop(self):
-        self.detener_anuncio()
-        self._validacion_activa      = False
-        self._autovalidacion_activa  = False
+    def _loop_parpadeo(self):
+        while self._running:
+            time.sleep(1)
+            if self.pantalla_actual == "activa":
+                self._estado_parpadeo = not self._estado_parpadeo
+                self.icon_wifi.color = (
+                    VERDE_OSCURO if self._estado_parpadeo
+                    else "#F5A66666"
+                )
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+    def _loop_anuncio_ui(self):
+        while self._running:
+            time.sleep(15)
+            if self.pantalla_actual != "activa":
+                continue
+            if self._confirmaciones_hoy == 0:
+                self.lbl_prox_anuncio.value = "Emitiendo cada 10s"
+            elif self._proximo_anuncio:
+                mins = max(0, int((self._proximo_anuncio - time.time()) / 60))
+                self.lbl_prox_anuncio.value = f"Próximo anuncio en: {mins} min"
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  GPS  (simplificado — Flet no tiene plyer.gps)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _iniciar_gps(self):
+        """
+        GPS: en Flet móvil se puede integrar con paquetes nativos.
+        Por ahora se mantiene la última ubicación guardada en JSON.
+        """
+        datos = cargar_datos()
+        lat = datos.get("lat", 0.0)
+        lon = datos.get("lon", 0.0)
+        if lat and lon:
+            self._lat = lat
+            self._lon = lon
+            self.lbl_gps.value = f"GPS: {self._lat:.4f}, {self._lon:.4f}"
+        else:
+            self.lbl_gps.value = "GPS: sin señal"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  RESTAURAR SESION
+    # ─────────────────────────────────────────────────────────────────────────
+    def _restaurar_sesion(self):
+        datos = cargar_datos()
+        if not datos:
+            return
+
+        self.lbl_nombre.value    = datos.get("nombre", "")
+        self.lbl_nss.value       = f"NSS: {datos.get('nss', '')}"
+        self.lbl_num_cred.value  = f"No. {datos.get('credencial', '')}"
+        self.lbl_cuadrilla.value = f"Cuadrilla: {obtener_cuadrilla_efectiva(datos)}"
+        self.lbl_ingreso.value   = f"Ingreso: {datos.get('fecha_ingreso', '')}"
+        self.img_foto.src        = datos.get("foto", "")
+
+        conf_guardadas = datos.get("confirmaciones_hoy", 0)
+        ultima = datos.get("ultima_asistencia", "")
+        if ultima:
+            try:
+                fecha_ultima = datetime.datetime.fromisoformat(ultima).date()
+                self._confirmaciones_hoy = (
+                    conf_guardadas if fecha_ultima == datetime.date.today() else 0
+                )
+            except Exception:
+                self._confirmaciones_hoy = 0
+
+        historial = datos.get("historial", [])
+        gracia    = en_periodo_gracia(datos)
+        faltas    = 0 if gracia else calcular_faltas_consecutivas(historial)
+        self.lbl_vigencia.value = self._texto_vigencia(faltas)
+        self._actualizar_texto_turno()
+        self.actualizar_badge_puesto()
+
+        if faltas >= MAX_FALTAS:
+            self.lbl_motivo.value       = f"{faltas} faltas.\nPreséntate a RH."
+            self.lbl_faltas_inact.value = f"Faltas del mes: {contar_faltas_mes(historial)}"
+            self.ir_a("inactiva")
+        else:
+            cred = datos.get("credencial", "")
+            cuad = datos.get("cuadrilla", "")
+            nomb = datos.get("nombre", "")
+            self.iniciar_anuncio_wifi(cred, cuad, nomb)
+            self.iniciar_servidor_validacion(cred, cuad)
+            self.iniciar_autovalidacion_apuntador(cred, cuad, nomb)
+            self._iniciar_gps()
+            self._cargar_qr(cred)
+            self.ir_a("activa")
 
 
-if __name__ == '__main__':
-    CredencialAgriCactusApp().run()
+# =============================================================================
+#  PUNTO DE ENTRADA
+# =============================================================================
+def main(page: ft.Page):
+    page.title = "AgriCactus"
+    page.theme_mode = ft.ThemeMode.LIGHT
+    page.padding = 0
+    page.bgcolor = CREMA_BG
+
+    try:
+        AgriCactusApp(page)
+    except Exception as e:
+        escribir_crash(e)
+        raise
+
+ft.run(main)
